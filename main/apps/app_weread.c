@@ -270,6 +270,34 @@ static bool action_enabled(int action) {
     return action == 0 || action == 4 || (s_logged && (action != 1 || !s_selected_cached));
 }
 
+static const EpdRect WORK_PROGRESS_AREA = {40,460,604,112};
+
+static void draw_work_progress_area(uint8_t *fb) {
+    ui_fill_rect_fast(WORK_PROGRESS_AREA, UI_GRAY_WHITE, fb);
+    if (s_total || s_job == WR_SYNC) {
+        char progress[64];
+        if (s_job == WR_SYNC && !s_total)
+            snprintf(progress,sizeof(progress),"正在连接并获取书架数据…");
+        else if (s_job == WR_SYNC)
+            snprintf(progress,sizeof(progress),"%u / %u 本封面已下载",s_done,s_total);
+        else
+            snprintf(progress,sizeof(progress),"%u / %u",s_done,s_total);
+        EpdRect bar = {122,482,440,24};
+        ui_fill_round_rect(fb,bar,12,0xd8);
+        unsigned pct = !s_total ? 0 : s_done >= s_total ? 100 :
+                       (unsigned)(((uint64_t)s_done*100u)/s_total);
+        int fill = (int)((bar.width-4)*pct/100u);
+        if (fill > 0)
+            ui_fill_round_rect(fb,(EpdRect){bar.x+2,bar.y+2,fill,bar.height-4},10,0x50);
+        ui_text_vc(fb,342,542,30,progress,EPD_DRAW_ALIGN_CENTER,false);
+    }
+}
+
+static EpdRect work_progress_area_hint(app_ctx_t *ctx) {
+    (void)ctx;
+    return WORK_PROGRESS_AREA;
+}
+
 static void render(app_ctx_t *ctx, uint8_t *fb) {
     (void)ctx;
     ui_clear_page(fb);
@@ -314,18 +342,7 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         static const char *const labels[] = {"请用微信扫码登录","正在同步书架与封面","正在缓存图文","正在上传本地进度","正在下载云端进度","正在上报阅读时长","正在验证登录状态"};
         ui_text_vc(fb,342,228,29,labels[s_job],EPD_DRAW_ALIGN_CENTER,false);
         if (s_qr[0]) ui_wifi_qr_draw(fb,(EpdRect){137,300,410,410});
-        if (s_total || s_job == WR_SYNC) {
-            char progress[64];
-            if (s_job == WR_SYNC && !s_total) snprintf(progress,sizeof(progress),"正在连接并获取书架数据…");
-            else if (s_job == WR_SYNC) snprintf(progress,sizeof(progress),"%u / %u 本封面已下载",s_done,s_total);
-            else snprintf(progress,sizeof(progress),"%u / %u",s_done,s_total);
-            EpdRect bar = {122,482,440,24};
-            ui_fill_round_rect(fb,bar,12,0xd8);
-            unsigned pct = !s_total ? 0 : s_done >= s_total ? 100 : (unsigned)(((uint64_t)s_done*100u)/s_total);
-            int fill = (int)((bar.width-4)*pct/100u);
-            if (fill > 0) ui_fill_round_rect(fb,(EpdRect){bar.x+2,bar.y+2,fill,bar.height-4},10,0x50);
-            ui_text_vc(fb,342,542,30,progress,EPD_DRAW_ALIGN_CENTER,false);
-        }
+        draw_work_progress_area(fb);
         button(fb,action_rect(4),"取消",true);
     }
     /* Status messages are modal: keep them off the shelf artwork so covers and
@@ -419,7 +436,9 @@ static app_redraw_t tick(app_ctx_t *ctx) {
         if (weread_progress_should_redraw(s_done, s_total, done, total, s_job == WR_CACHE)) {
             s_done = done;
             s_total = total;
-            return APP_REDRAW_PAGE;
+            ui_text_set_system_scale(true);
+            draw_work_progress_area(ctx->fb);
+            return APP_REDRAW_AREA;
         }
         return APP_REDRAW_NONE;
     }
@@ -546,6 +565,7 @@ const app_desc_t app_weread = {
     .main_page_visible=root,
     .on_enter=enter, .on_exit=leave, .on_tick=tick, .render=render,
     .on_nav_reselect=nav_reselect,
+    .area_hint=work_progress_area_hint,
     .on_gesture=gesture, .on_key=key, .on_media_lost=lost, .on_media_ready=media,
     .on_before_lock=locking,
 };
