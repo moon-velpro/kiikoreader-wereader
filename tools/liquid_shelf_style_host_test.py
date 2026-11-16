@@ -48,8 +48,7 @@ typedef struct {int type,x0,y0,x,y;} ui_gesture_event_t;
 #define EPD_DRAW_ALIGN_CENTER 1
 #define SETTINGS_SCROLL_MAX 1000
 static int s_page=SETTINGS_SHELF_STYLE,s_style_scroll,s_main_scroll,s_ble_scroll,viewport=1088,style=2;
-static bool s_scroll_drag_consumed,s_scroll_present_pending,s_main_wifi_saved;
-static char s_main_wifi[33];
+static bool s_scroll_drag_consumed,s_scroll_present_pending;
 static unsigned glass,acrylic,headers,footers,cards,titles;
 static int settings_viewport_end(void){return viewport;}
 static int settings_content_end(void){return viewport;}
