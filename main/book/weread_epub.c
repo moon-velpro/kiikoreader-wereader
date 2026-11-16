@@ -1,4 +1,5 @@
 #include "weread_internal.h"
+#include "weread_zip_stream.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -119,12 +120,17 @@ static bool write_xml(FILE *file, const char *text, size_t size) {
 }
 
 static bool file_entry(epub_writer_t *zip, const char *name, FILE *entry, size_t max) {
-    long end = ftell(entry);
-    if (end < 0 || (size_t)end > max || fseek(entry, 0, SEEK_SET)) return false;
-    char *data = heap_caps_malloc((size_t)end+1, MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-    if (!data) return false;
-    bool ok = fread(data, 1, end, entry) == (size_t)end && zip_entry(zip, name, data, end);
-    free(data);
+    if (!zip || !entry || zip->count >= ZIP_ENTRY_MAX) return false;
+    /* Stream the existing chapter/OPF/nav staging file into the ZIP once,
+     * instead of allocating and copying the entire file into PSRAM. */
+    const size_t scratch_bytes = 8192;
+    char *scratch = heap_caps_malloc(scratch_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!scratch) return false;
+    if (max > ZIP_OUTPUT_MAX) max = ZIP_OUTPUT_MAX;
+    bool ok = wr_zip_append_stored_file(zip->file, zip->directory, entry,
+                                         name, max, scratch, scratch_bytes);
+    if (ok) ++zip->count;
+    free(scratch);
     return ok;
 }
 
