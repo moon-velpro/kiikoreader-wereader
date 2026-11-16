@@ -9,6 +9,7 @@ from home_cover_cache_host_test import function
 ROOT = Path(__file__).resolve().parents[1]
 source = ROOT/'main/apps/app_book.c'
 unit = r'''
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -31,6 +32,7 @@ typedef struct {void *hl;int64_t now_ms;bool consumed,request_app,request_return
 static int s_view=READING,s_reader_panel=READER_PANEL_NONE,E0470_FOLLOW_WAVEFORM;
 static bool immersive;
 static bool app_settings_reader_immersive(void){return immersive;}
+static bool app_book_status_bar_visible(void){return true;}
 static bool s_reader_fullscreen=false,s_toolbar,s_clear_confirm,s_reader_footer_pending,s_save_failed;
 static const char *s_text="body";
 static size_t s_chapter=36,total_chapters=48;
@@ -50,7 +52,7 @@ static void ui_hairline(uint8_t *fb,int y,int x,int width,int gray){(void)fb;ass
 
 static enum EpdDrawError error;
 static const char *expected_chapter="Chapter name";
-static unsigned percent(size_t page){return (unsigned)page;}
+static size_t layout_pages=48;static size_t book_layout_page_count(void){return layout_pages;}static unsigned percent(size_t page){return page==36?74:(unsigned)page;}
 static size_t book_chapter_count(void){return total_chapters;}
 static void fit_fixed_text(char *text,int px,int width){assert(px>0&&width>0);(void)text;}
 static int ui_text_fixed_width_px(int px,const char *text){return (int)strlen(text)*px/2;}
@@ -79,13 +81,13 @@ for name in ['draw_reader_header','progress_rect','reader_footer_progress', 'dra
     unit += function(name, source)+'\n'
 unit += r'''
 int main(void){
- char text[48];reader_footer_progress(text,sizeof(text),74);assert(!strcmp(text,"37/48  74%"));
- total_chapters=0;reader_footer_progress(text,sizeof(text),0);assert(!strcmp(text,"0/0  0%"));total_chapters=48;
+ char text[48];reader_footer_progress(text,sizeof(text),36);assert(!strcmp(text,"37/48  74%"));
+ total_chapters=0;layout_pages=0;reader_footer_progress(text,sizeof(text),0);assert(!strcmp(text,"0/0  0%"));total_chapters=48;layout_pages=48;
  s_chapter=99;reader_footer_progress(text,sizeof(text),100);assert(!strcmp(text,"48/48  100%"));s_chapter=36;
  s_reader_fullscreen=false;uint8_t none=0;
  for(int style=0;style<2;++style){
   immersive=style;s_reader_favorite=style;text_calls=bar_calls=fill_calls=status_calls=0;title_calls=back_calls=favorite_calls=0;
-  draw_reader_header(&none);draw_reader_metadata(&none,74);
+  draw_reader_header(&none);draw_reader_metadata(&none,36);
   assert(status_calls==1&&text_calls==2&&bar_calls==2&&fill_calls==3&&reader_status_visible());
   assert(title_calls==1&&back_calls==1&&favorite_calls==1&&ui_reader_body(false,style,24,false).y==(style?16:84));
   app_ctx_t ctx={.now_ms=1000};s_reader_footer_pending=true;s_reader_footer_due_ms=900;
@@ -94,7 +96,7 @@ int main(void){
  for(int full=0;full<2;++full){
  s_reader_fullscreen=true;immersive=full;s_reader_footer_pending=false;s_view=READING;calls=guards=text_calls=bar_calls=fill_calls=0;
  assert(reader_status_visible()==!full);status_calls=0;title_calls=back_calls=favorite_calls=0;
- uint8_t fb=0;draw_reader_metadata(&fb,74);assert(text_calls==(full?0:2)&&bar_calls==2&&fill_calls==(full?1:2)&&status_calls==(full?0:1));
+ uint8_t fb=0;draw_reader_metadata(&fb,36);assert(text_calls==(full?0:2)&&bar_calls==2&&fill_calls==(full?1:2)&&status_calls==(full?0:1));
  assert(ui_reader_body(true,false,24,false).y==84&&ui_reader_header().height==80&&!title_calls&&!back_calls&&!favorite_calls);
  touch_t touch={0};app_ctx_t ctx={.now_ms=100,.touch=&touch};
  assert(reader_metadata_tick(&ctx)==APP_REDRAW_NONE&&!calls);
