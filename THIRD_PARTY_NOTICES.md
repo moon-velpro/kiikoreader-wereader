@@ -49,7 +49,7 @@ replace these component licenses or restrict their independently granted rights.
 `components/e0470_epaper_waveform/e0470_epaper_waveform.c` 中文字翻页表的组装移植自
 FreeInk `libs/display/EpdiyLcd/src/e0470/e0470_epaper_waveform.c`，保留原有
 `Copyright 2026 mindreset` / Apache-2.0 文件头；FreeInk `Copyright (c) 2026 FreeInk`
-及 CrossMux MIT 全文分别保留在上述 LICENSE-FreeInk-SDK.txt 和 LICENSE-CrossMux.txt。
+及 CrossMux MIT 全文分别保留在上述 `licenses/FreeInk-SDK-MIT.txt` 和 `licenses/CrossMux-MIT.txt`。
 仅普通文字翻页启用此表，原始波形数据表、驱动扫描时序与其他界面保持原样。
 The text-turn assembly is adapted from the pinned FreeInk source above,
 retaining its mindreset Apache-2.0 file notice and the complete FreeInk/CrossMux
@@ -71,7 +71,7 @@ Unicode Unihan kTGH data is used to select ordinary-book characters and validate
 
 ## WeRead Web protocol
 
-`main/book/weread_protocol.c` adapts protocol details from [CrossMux WeReadWebApi](https://github.com/0x1abin/crossmux/tree/efee672b612c8e2319f27b4f2a2a861d2e627229/lib/WeReadWebApi), under the existing [CrossMux MIT notice](licenses/LICENSE-CrossMux.txt).
+`main/book/weread_protocol.c` adapts protocol details from [CrossMux WeReadWebApi](https://github.com/0x1abin/crossmux/tree/efee672b612c8e2319f27b4f2a2a861d2e627229/lib/WeReadWebApi), under the existing [CrossMux MIT notice](licenses/CrossMux-MIT.txt).
 
 ## Five Bluetooth remote decoders (C adaptation)
 
