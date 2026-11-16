@@ -34,7 +34,7 @@ bool wr_prefetch_begin(wr_prefetch_t *state, wr_prefetch_fetch_fn fn,
     state->kick = xSemaphoreCreateBinary();
     state->done = xSemaphoreCreateBinary();
     if (state->kick && state->done &&
-        xTaskCreateWithCaps(wr_prefetch_thread, "wr_prefetch", 12 * 1024, state, 1,
+        xTaskCreateWithCaps(wr_prefetch_thread, "wr_prefetch", 16 * 1024, state, 1,
                             &state->task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) return true;
     if (state->kick) vSemaphoreDelete(state->kick);
     if (state->done) vSemaphoreDelete(state->done);
