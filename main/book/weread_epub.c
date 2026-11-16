@@ -280,6 +280,35 @@ static const char *image_src(const char *p, const char *end, size_t *length) {
     return NULL;
 }
 
+static bool chapter_has_tar_images(const char *data) {
+    static const char *const prefixes[] = {
+        "https://res.weread.qq.com/wrepub/",
+        "http://res.weread.qq.com/wrepub/",
+        "//res.weread.qq.com/wrepub/"
+    };
+    for (const char *p = data; p && *p;) {
+        if (*p != '<') { ++p; continue; }
+        bool image = !strncasecmp(p, "<img", 4) &&
+                     (isspace((unsigned char)p[4]) || p[4] == '>');
+        bool svg_image = !strncasecmp(p, "<image", 6) &&
+                         isspace((unsigned char)p[6]);
+        if (!image && !svg_image) { ++p; continue; }
+        const char *end = tag_end(p);
+        if (!end) return false;
+        size_t length = 0;
+        const char *src = image_src(p + (image ? 4 : 6), end, &length);
+        if (src) {
+            for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
+                size_t prefix_size = strlen(prefixes[i]);
+                if (length >= prefix_size && !strncasecmp(src, prefixes[i], prefix_size))
+                    return true;
+            }
+        }
+        p = end + 1;
+    }
+    return false;
+}
+
 static unsigned utf16_at(const char *text, size_t bytes) {
     unsigned count = 0;
     for (size_t i = 0; i < bytes; ++i) {
@@ -548,7 +577,7 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
          * HTTPS images only when a bundle member cannot be identified. */
         char *tar_data = NULL;
         size_t tar_bytes = 0;
-        if (chapters[i].tar[0] && !plain && !wr_cancelled()) {
+        if (chapters[i].tar[0] && !plain && chapter_has_tar_images(content) && !wr_cancelled()) {
             char tar_url[384], reader_referer[384];
             const char *src = chapters[i].tar;
             int n = !strncmp(src, "//", 2)
