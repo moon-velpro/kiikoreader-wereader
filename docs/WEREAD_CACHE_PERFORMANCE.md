@@ -2,9 +2,9 @@
 
 ## Scope and baseline
 
-This branch is based on the repository's current `main`, not on the separately reported 81.5 s working-tree snapshot. The current repository source does not contain the reported chapter-TAR path, HTTP host pool, or chapter prefetch implementation. Do not interpret the 81.5 s measurements as measurements of this branch.
+This branch is based on the repository's current `main`, not on the separately reported 81.5 s working-tree snapshot. The original `main` baseline did not contain the reported chapter-TAR path or chapter prefetch. This branch now independently implements TAR image bundles and a bounded prefetch pipeline, but it is not the same source snapshot and has not reproduced the 81.5 s device measurement.
 
-This PR builds an experimental high-performance pipeline on top of the older sequential cache source: Reader/shard gzip, shard Keep-Alive, bounded one-worker chapter prefetch, single-pass ZIP writing, image deduplication and progress redraw coalescing. It does not add concurrently active TLS sockets, change radio buffers or change panel waveforms. These changes are **not** a port of the missing 81.5-second TAR pipeline.
+The experimental pipeline combines Reader/shard gzip, cache-only shard Keep-Alive with a circuit breaker, one-worker chapter+TAR prefetch, single-pass ZIP writing, image deduplication and progress redraw coalescing. It does not add concurrently active TLS sockets, change radio buffers or change panel waveforms.
 
 ## Timing added
 
@@ -21,7 +21,7 @@ Image time is reported separately because it is nested inside the EPUB transform
 
 - **Reader response gzip**: only the streaming Reader fields request advertises gzip. The response decoder detects the 1F 8B header, uses zlib inflate with an allocator directed to PSRAM, and emits at most 2 KiB per callback. Identity responses continue to work unchanged. Truncated gzip, corrupt gzip, and decompression beyond 8 MiB fail cleanly. Full-response image / JSON requests retain identity encoding.
 - **Chapter shard gzip**: requests under `/web/book/chapter/` now advertise gzip, with a bounded PSRAM decompression pass after the complete response. The original identity path is used when the body has no gzip signature. The decoded size is capped by the existing response limit. This reduces wire bytes where the server supports gzip, but requires hardware benchmarking to establish net savings.
-- **Successful-image deduplication**: during one EPUB build, an identical normalized source URL reuses its prior ZIP entry name without another HTTPS download. Exact equality avoids collisions; this is a bounded best-effort cache of at most 48 URLs, and all URL copies are released at book completion/cancellation. It does not solve relative TAR paths or change CDN restrictions.
+- **Successful-image deduplication**: during one EPUB build, an identical normalized source URL reuses its prior ZIP entry name without another HTTPS download. Exact equality avoids collisions; this is a bounded best-effort cache of at most 48 URLs, and all URL copies are released at book completion/cancellation. Chapter TAR assets are now matched by source basename first; individual CDN GET remains the fallback for missing or unsupported members.
 - **Cache-only 5% redraw coalescing**: avoids a full redraw for every chapter and reserves the final completion frame for the status transition. Other WeRead job types still redraw on progress changes. This does **not** yet turn on partial DU.
 
 Host tests run with sanitizers:
@@ -34,22 +34,24 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -o /tmp/weread-progress && /tmp/weread-progress
 ```
 
-No S31 firmware build or physical hardware benchmark is reported as passing at the time of writing.
+The S31 and Pico firmware builds passed at commit `b17c8a6`, before the later combined chapter+TAR prefetch refactor. Those newer commits still require a fresh firmware build. No physical-device speed benchmark has been run for this branch.
 
 ## Aggressive pipeline additions
 
 - **Cache-only POST shard Keep-Alive:** the existing `esp_http_client_perform()` reusable-handle path now handles `/web/book/chapter/` POST shards. A non-200 response, transport failure, or invalid gzip trips a **per-job circuit breaker**, drops the handle, and falls back to the older `open/fetch/read` code for the same request. Auth failures/cancel are not blindly replayed. Counters track fast hits and fallbacks.
-- **Bounded one-worker prefetch:** after downloading chapter i, a PSRAM-stack task begins fetching chapter i+1 while the original worker converts/writes chapter i. The request path is guarded with one mutex so only **one TLS operation** is active at a time. One ready chapter slot, 6 MiB free-PSRAM minimum, automatic serial fallback, and explicit task shutdown are required. This targets CPU/network/SD overlap; it is not multi-TLS transfer.
+- **Bounded body+TAR prefetch:** a 16 KiB PSRAM-stack task fetches chapter i+1 and, only when its XHTML references WeRead-hosted images, fetches that chapter's TAR bundle too. It does both while the original worker rewrites chapter i. The request path is guarded with one mutex so only **one TLS operation** is active at a time. One ready bundle slot, 4 MiB free-PSRAM admission, half-free-PSRAM response budgets, automatic serial fallback, and an ownership-aware release callback bound memory and cleanup. This targets network/CPU/SD overlap; it is not multi-TLS transfer.
 - **Deferred cookie persistence:** cache HTTP response cookies stay updated in RAM; NVS persistence is deferred until the internal-stack cache work task finishes, so the PSRAM-stack worker never writes NVS directly.
 - **Single-pass stored ZIP entries:** chapter XHTML, OPF, and nav staging files are appended to EPUB as stored ZIP members through a bounded 8 KiB scratch buffer with a signed data descriptor. The file is read once for CRC+write; no full-file PSRAM copy is needed. EPUB mimetype remains the original first stored entry.
-- **Independent test job:** `weread-cache-host-tests` is isolated from unrelated existing repository host/board test failures. ZIP entries are cross-checked with Python `zipfile`; FreeRTOS task sequencing is tested with a pthread host shim and ASan/UBSan.
+- **TAR image bundling:** only chapters whose XHTML contains a `res.weread.qq.com/wrepub/` image URL request the chapter TAR. The request sends WeRead cookies and the chapter Reader Referer, follows the signed Tencent COS redirect, then removes the Cookie header before leaving the WeRead host. The POSIX TAR parser validates header checksums, bounds, duplicate basenames and truncated tails. Unsupported/missing entries fall back to the existing individual-image GET.
+- **Independent test job:** `weread-cache-host-tests` is isolated from unrelated existing repository host/board test failures. ZIP entries are cross-checked with Python `zipfile`; TAR lookup/checksum and nested prefetch-result cleanup are tested with ASan/UBSan and a pthread host shim.
 
 ### Known verification constraints
 
 - Existing unrelated `display-host-tests` fails before new tests because the repository license manifest does not list `licenses/LICENSE-CrossMux.txt`.
 - Existing `board-reader-tests` fails at `txt_navigation_host_test.py` due to unresolved `book_index_cache_prepare_file` and `book_epub_cached_chapter_count` host symbols.
-- The S31 full firmware build and physical device validation must be reviewed independently. These unrelated job failures do not establish a WeRead regression, but a passing host job alone does not establish firmware compatibility.
-- The active branch is **not** the previously reported 81.5-second TAR/prefetch source. No new wall-clock claims should be made without same-book device runs.
+- S31 and Pico firmware builds passed at `b17c8a6`; the combined body+TAR prefetch refactor is newer and its fresh board builds are pending. Physical-device validation remains outstanding.
+- Existing unrelated host/board test failures do not establish a WeRead regression, but a passing WeRead host job alone does not establish firmware compatibility.
+- The earlier 81.5-second result remains an external measurement. This branch has not reproduced it; no new wall-clock claim should be made without same-book device runs.
 
 ## Open-source optimization leads
 
@@ -85,7 +87,7 @@ ESP-IDF lwIP guidance recommends changing one parameter at a time, considering T
 
 1. Capture at least three runs of the same book and network/AP, reporting median and range.
 2. Separate fetch time, image request time, EPUB transformation time, SD write/flush time, and panel blocking time.
-3. Only if fetch waits dominate: prototype bounded prefetch with one network worker and a queue depth of at most two; do not add concurrent TLS sockets initially.
+3. Validate the combined body+TAR prefetch against the serial path on the same book and AP; retain one active TLS request and a single ready bundle slot.
 4. Only if TCP receive stalls dominate: test one lwIP/Wi-Fi parameter at a time, recording internal free heap and largest contiguous DMA block before Wi-Fi init and during download.
 5. Only if panel blocking appears on the critical path: evaluate partial DU refresh with completion-frame arbitration and UNDERRUN monitoring.
 6. Keep a byte-identical output/EPUB validation test alongside speed measurements.
