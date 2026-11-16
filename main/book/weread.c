@@ -35,7 +35,7 @@
 #include "settings.h"
 
 #define WR_MAX_SHELF 8192
-#define WR_REPORT_COUNT 17 /* 16 normal slots plus one overflow reserve. */
+#define WR_REPORT_COUNT 17 /* Expanded queue capacity for transient offline backlog. */
 #define WR_REPORT_STORE_MAGIC UINT32_C(0x57525232)
 #define WR_INDEX WR_DIR "/shelf.bin"
 #define WR_INDEX_TEMP WR_DIR "/shelf.part"
@@ -1976,13 +1976,22 @@ static bool report_reading(void) {
             deferred.milliseconds = s_reading.ms;
             portENTER_CRITICAL(&s_lock);
             previous_deferred = s_deferred_reading;
-            s_deferred_reading = deferred;
+            bool already_persisted =
+                s_deferred_reading.milliseconds == deferred.milliseconds &&
+                s_deferred_reading.library == deferred.library &&
+                !strcmp(s_deferred_reading.owner, deferred.owner) &&
+                !strcmp(s_deferred_reading.book_id, deferred.book_id);
+            if (!already_persisted) s_deferred_reading = deferred;
             portEXIT_CRITICAL(&s_lock);
-            deferred_saved = persist_report_queue_locked();
-            if (!deferred_saved) {
-                portENTER_CRITICAL(&s_lock);
-                s_deferred_reading = previous_deferred;
-                portEXIT_CRITICAL(&s_lock);
+            /* Avoid committing the same overflow blob on every UI tick while
+             * the queue remains full; this record is already durable. */
+            if (!already_persisted) {
+                deferred_saved = persist_report_queue_locked();
+                if (!deferred_saved) {
+                    portENTER_CRITICAL(&s_lock);
+                    s_deferred_reading = previous_deferred;
+                    portEXIT_CRITICAL(&s_lock);
+                }
             }
         }
         (void)xSemaphoreGive(s_report_store_mutex);
@@ -2035,13 +2044,20 @@ void wr_reading_stop(bool close) {
             wr_reading_store_t previous;
             portENTER_CRITICAL(&s_lock);
             previous = s_deferred_reading;
-            memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
-            memcpy(s_deferred_reading.book_id, s_reading.book.id, sizeof(s_deferred_reading.book_id));
-            memcpy(s_deferred_reading.owner, s_reading.owner, sizeof(s_deferred_reading.owner));
-            s_deferred_reading.library = s_reading.library;
-            s_deferred_reading.milliseconds = s_reading.ms;
+            bool already_persisted =
+                previous.milliseconds == s_reading.ms &&
+                previous.library == s_reading.library &&
+                !strcmp(previous.owner, s_reading.owner) &&
+                !strcmp(previous.book_id, s_reading.book.id);
+            if (!already_persisted) {
+                memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
+                memcpy(s_deferred_reading.book_id, s_reading.book.id, sizeof(s_deferred_reading.book_id));
+                memcpy(s_deferred_reading.owner, s_reading.owner, sizeof(s_deferred_reading.owner));
+                s_deferred_reading.library = s_reading.library;
+                s_deferred_reading.milliseconds = s_reading.ms;
+            }
             portEXIT_CRITICAL(&s_lock);
-            persisted = persist_report_queue_locked();
+            persisted = already_persisted || persist_report_queue_locked();
             if (!persisted) {
                 portENTER_CRITICAL(&s_lock);
                 s_deferred_reading = previous;
