@@ -21,8 +21,8 @@ typedef struct {
  * or its bounded allocation cannot grow. Always reserve one NUL byte. */
 static inline bool wr_body_buffer_write(const char *bytes, size_t n, void *arg) {
     wr_body_buffer_t *sink = arg;
-    if (!sink || !sink->resize || (n && !bytes) || sink->used > sink->limit ||
-        n > sink->limit - sink->used) {
+    if (!sink || !sink->resize || (n && !bytes) || sink->limit == SIZE_MAX ||
+        sink->used > sink->limit || n > sink->limit - sink->used) {
         if (sink) sink->failed = true;
         return true;
     }
@@ -30,7 +30,8 @@ static inline bool wr_body_buffer_write(const char *bytes, size_t n, void *arg) 
     size_t need = sink->used + n + 1;
     if (need > sink->capacity) {
         size_t max_capacity = sink->limit + 1;
-        size_t next = sink->capacity ? sink->capacity : 1024;
+        size_t next = sink->capacity ? sink->capacity :
+                      (max_capacity < 1024 ? max_capacity : 1024);
         while (next < need) {
             next = next > max_capacity / 2 ? max_capacity : next * 2;
         }
