@@ -1170,6 +1170,7 @@ static bool renew_session(void) {
         }
     }
     s_expired = false;
+    s_error_message = "操作失败，请检查网络后重试";
     ESP_LOGI("WEREAD", "session renewal confirmed refresh_cookie=%d", session_cookie_has("wr_rt"));
     return true;
 }
