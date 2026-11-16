@@ -68,6 +68,10 @@ static void save_progress(void){++progress_saves;}
 static void free_book(void){s_text=NULL;}
 static bool pico_boot_recovery(void){return recovery_mode;}
 static int64_t esp_timer_get_time(void){return 1000000;}
+static unsigned app_settings_book_weight_fine(void){return 0;}
+static bool app_settings_book_antialias(void){return false;}
+static void ttf_set_stroke_adjust_fine(unsigned value){(void)value;}
+static void ttf_set_antialias(bool enabled){(void)enabled;}
 static void before_lock(app_ctx_t *ctx){(void)ctx;++checkpoints;invalidate_prep();s_save_failed=save_fails;}
 static void retry_progress(void){++retries;s_save_failed=save_fails;}
 static void app_restart_host(void){assert(checkpoints&&retries&&!s_save_failed);++restarts;}
