@@ -176,16 +176,16 @@ int main(void){
  present(&ctx,APP_REDRAW_AREA);assert(calls==1&&selected==21&&rendered==0); // local UI: no footer replay
  reset();fail=1;s_reader_footer_pending=false;
  present(&ctx,APP_REDRAW_AREA);assert(calls==1&&selected==20&&!s_reader_text_frame);
- reset();s_water_turn_pending=true;s_reader_footer_pending=false;
+ reset();tick=1;s_water_turn_pending=true;s_reader_footer_pending=false;
  present(&ctx,APP_REDRAW_AREA);assert(selected==18&&calls==1&&!s_water_turn_pending);
  for(int full=0;full<2;++full){
-  reset();s_reader_fullscreen=full;s_area=reader_area();s_water_turn_pending=true;
+  reset();tick=1;s_reader_fullscreen=full;s_area=reader_area();s_water_turn_pending=true;
   s_area=(EpdRect){0,160,684,900};
   present(&ctx,APP_REDRAW_AREA);assert(selected==18&&calls==1&&!s_water_turn_pending);
   assert(last_water_area.x==0&&last_water_area.y==0&&last_water_area.width==684&&last_water_area.height==1216);
  }
  s_area=(EpdRect){0,0,684,1216};
- reset();fail=1;s_water_turn_pending=true;
+ reset();tick=1;fail=1;s_water_turn_pending=true;
  present(&ctx,APP_REDRAW_AREA);assert(selected==18&&calls==1&&!s_reader_text_frame);
  // 图像始终保留灰阶，进度同轮输出。/ Images retain gray targets with deferred metadata.
  for(int effect=0;effect<3;++effect)for(int full=0;full<2;++full)for(int hide_status=0;hide_status<2;++hide_status)for(int kind=0;kind<3;++kind){
