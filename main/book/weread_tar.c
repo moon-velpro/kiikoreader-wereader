@@ -5,7 +5,7 @@
 #include <string.h>
 #include <strings.h>
 
-static const char *tar_tag_end(const char *start) {
+const char *wr_tar_tag_end(const char *start) {
     char quote = 0;
     for (const char *p = start; *p; ++p) {
         if (quote) { if (*p == quote) quote = 0; }
@@ -15,7 +15,7 @@ static const char *tar_tag_end(const char *start) {
     return NULL;
 }
 
-static const char *tar_image_src(const char *p, const char *end, size_t *length) {
+const char *wr_tar_image_src(const char *p, const char *end, size_t *length) {
     while (p < end) {
         while (p < end && isspace((unsigned char)*p)) ++p;
         const char *key = p;
@@ -38,7 +38,7 @@ static const char *tar_image_src(const char *p, const char *end, size_t *length)
     return NULL;
 }
 
-static bool tar_image_url(const char *src, size_t length) {
+bool wr_tar_image_url(const char *src, size_t length) {
     static const char *const prefixes[] = {
         "https://res.weread.qq.com/wrepub/",
         "http://res.weread.qq.com/wrepub/",
@@ -62,11 +62,11 @@ bool wr_tar_chapter_has_images(const char *xhtml) {
         bool svg_image = remaining >= 6 && !strncasecmp(p, "<image", 6) &&
                          isspace((unsigned char)p[6]);
         if (!image && !svg_image) { ++p; continue; }
-        const char *end = tar_tag_end(p);
+        const char *end = wr_tar_tag_end(p);
         if (!end) return false;
         size_t length = 0;
-        const char *src = tar_image_src(p + (image ? 4 : 6), end, &length);
-        if (src && tar_image_url(src, length)) return true;
+        const char *src = wr_tar_image_src(p + (image ? 4 : 6), end, &length);
+        if (src && wr_tar_image_url(src, length)) return true;
         p = end + 1;
     }
     return false;
