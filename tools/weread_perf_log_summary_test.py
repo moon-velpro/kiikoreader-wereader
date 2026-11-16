@@ -19,6 +19,7 @@ I (4) WEREAD: cache prefetch hits=2 wait_ms=50 enabled=1
 I (5) WEREAD: cache image reuse hits=4 stored=9 tar_images=7 tar_fallbacks=1
 I (6) WEREAD: cache shard keep-alive hits=12 fallbacks=1 disabled=1
 I (7) WEREAD: cache profile book=123 chapters=3 fetch_ms=300 transform_ms=200 image_ms=10 chapter_wall_ms=500
+I (8) WEREAD: work done kind=2 ok=1 canceled=0 elapsed_ms=740 stack_hwm=4096 internal_free=18000 psram_free=2500000
 """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "serial.log"
@@ -32,6 +33,8 @@ I (7) WEREAD: cache profile book=123 chapters=3 fetch_ms=300 transform_ms=200 im
         self.assertEqual(result["keepalive"][0]["fallbacks"], 1)
         self.assertEqual(result["profiles"][0]["chapters"], 3)
         self.assertEqual(result["chapter_summary"]["successful"], 1)
+        self.assertEqual(result["work"][0]["elapsed_ms"], 740)
+        self.assertEqual(result["work"][0]["psram_free"], 2500000)
 
 
 if __name__ == "__main__":
