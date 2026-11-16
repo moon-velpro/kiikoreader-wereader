@@ -42,6 +42,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/apps \
             tools/weread_progress_host_test.c -o "$RUNNER_TEMP/weread-progress"
           "$RUNNER_TEMP/weread-progress"
+          python3 tools/weread_perf_log_summary_test.py
 
   display-host-tests:
     env:
