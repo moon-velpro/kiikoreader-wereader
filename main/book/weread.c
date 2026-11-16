@@ -713,6 +713,9 @@ static char *http_request_impl(const char *url, const char *body, const char *re
                           bool *fields_received, bool *post_started) {
     const int64_t request_started_us = esp_timer_get_time();
     s_http_open_failed = false;
+    const bool service = url[0] == '/';
+    const bool res_archive = !strncasecmp(url, "https://res.weread.qq.com/wrco/",
+                                             sizeof("https://res.weread.qq.com/wrco/") - 1);
     if (wr_cancelled()) { s_error_message = "操作已取消"; return NULL; }
     if (!wr_online()) { http_keepalive_drop(); s_error_message = "Wi-Fi 未连接或网络尚未就绪"; return NULL; }
     if (url[0] == '/' || res_archive) restore_session_cookie();
@@ -770,9 +773,6 @@ static char *http_request_impl(const char *url, const char *body, const char *re
         ESP_LOGW("WEREAD", "cache shard keep-alive disabled: fallback to safe request path");
     }
     char *absolute = request->absolute;
-    const bool service = url[0] == '/';
-    const bool res_archive = !strncasecmp(url, "https://res.weread.qq.com/wrco/",
-                                             sizeof("https://res.weread.qq.com/wrco/") - 1);
     const bool compressed_shard = !chunk && service &&
         !strncmp(url, "/web/book/chapter/", sizeof("/web/book/chapter/") - 1);
     request->capture_service_cookies = service;
