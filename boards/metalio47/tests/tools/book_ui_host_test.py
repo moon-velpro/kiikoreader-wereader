@@ -286,6 +286,9 @@ static app_redraw_t editor_paint(app_ctx_t* ctx,bool field){(void)ctx;(void)fiel
 static int test_nav_target=-1;
 static void ui_nav_request(app_ctx_t* ctx,int tab){(void)ctx;test_nav_target=tab;}
 static void app_files_request_folder(int folder){(void)folder;}
+static const app_desc_t app_device_settings={0};
+static bool test_shelf_style_requested;
+static void app_device_settings_request_shelf_style(void){test_shelf_style_requested=true;}
 #define UI_KEY_1 1
 #define UI_KEY_2 2
 #define UI_KEY_3 3
@@ -298,6 +301,14 @@ static EpdRect s_area;
 static void prepare_covers(app_ctx_t *ctx){(void)ctx;++test_cover_prepares;}
 static void render(app_ctx_t *ctx,uint8_t *fb){(void)ctx;(void)fb;++test_shelf_renders;}
 static bool s_resume_pending,s_reader_cleanup,s_shake_enabled;
+static bool s_rc_double_pending,s_manage_style_restore;
+static void rc_pause_auto(void){}
+static void rc_stop_auto(void){}
+static void rc_cancel_side(void){}
+static int shelf_order_mode(void);
+static bool shelf_order_desc(void);
+static bool shelf_order_apply(app_ctx_t *ctx,int mode,bool desc);
+static bool app_settings_try_shelf_order(unsigned order){(void)order;return true;}
 static bool s_reader_fullscreen,test_reader_immersive,test_hold_refresh,test_hide_images,test_power_turn;
 static bool test_images_visible=true;
 static int test_reflow_failures,test_reflows,test_image_preparations;
@@ -468,7 +479,7 @@ static unsigned s_chapter_lead_row_height;
 static void apply_chapter_lead(const char *title,const char *label,size_t skip,unsigned row){(void)title;(void)label;(void)skip;(void)row;}
 static void refresh_chapter_lead(void){}
 '''
-for name in ("inline_ink_gray", "reader_margin_width", "reader_margin_levels", "reader_margin_level_for", "reader_margin_for_level", "slider_index", "reader_margin_input", "reader_area", "reader_fullscreen_progress_area", "body_rect_for_tracking", "body_rect", "progress_rect", "copy_text", "reader_footer_strip_number", "favorite_key", "favorite_read_handle", "shelf_hidden_key", "shelf_hidden_read_handle", "shelf_hidden_load", "shelf_hidden_save", "shelf_display_style", "shelf_rows", "row_rect", "shelf_category_add", "shelf_category_init", "shelf_category_matches", "shelf_category_remember", "shelf_category_restore", "shelf_categories_recount", "shelf_matches", "compare_books", "sort_shelf", "shelf_reserve", "delete_retry_find", "delete_retry_reserve", "delete_retry_discard", "scan_shelf_dir", "shelf_backfill_visit", "shelf_backfill_read_books", "scan_shelf", "refresh_cached_progress",
+for name in ("inline_ink_gray", "reader_margin_width", "reader_margin_levels", "reader_margin_level_for", "reader_margin_for_level", "slider_index", "reader_margin_input", "reader_area", "reader_fullscreen_progress_area", "body_rect_for_tracking", "body_rect", "progress_rect", "copy_text", "reader_footer_strip_number", "favorite_key", "favorite_read_handle", "shelf_hidden_key", "shelf_hidden_read_handle", "shelf_hidden_load", "shelf_hidden_save", "shelf_display_style", "shelf_rows", "row_rect", "shelf_category_add", "shelf_category_init", "shelf_category_matches", "shelf_category_remember", "shelf_category_restore", "shelf_categories_recount", "shelf_matches", "compare_books", "sort_shelf", "shelf_order_apply", "shelf_reserve", "delete_retry_find", "delete_retry_reserve", "delete_retry_discard", "scan_shelf_dir", "shelf_backfill_visit", "shelf_backfill_read_books", "scan_shelf", "refresh_cached_progress",
              "pending_find", "pending_reserve", "pending_restore", "pending_discard", "pending_mark_latest", "pending_drop_invalidated", "pending_flush", "reader_page_offset", "save_progress", "retry_progress", "layout_name", "manage_panel", "manage_rect", "batch_rect", "manage_back_rect", "shelf_manage_rect", "shelf_sort_rect", "shelf_pager_group_rect", "shelf_search_rect", "shelf_search_clear_rect", "bulk_filter_rect", "bulk_nav_rect", "bulk_nav_hit", "bulk_sort_rect", "shelf_sort_menu_rect", "shelf_order_mode", "shelf_order_desc", "leaves", "selected_count", "clear_selection", "toggle_selection", "bookmark_compact", "search_begin", "refresh_search_matches", "search_finish", "shelf_search_clear", "refresh_capacity", "manage_apply", "manage_action", "batch_apply", "batch_action", "bulk_turn_page", "bulk_finish", "bulk_select_row", "bulk_action", "bulk_control_at", "menu_handle_enabled", "reader_manual_refresh", "apply_reader_option", "reader_return", "reader_key_action", "import_finish", "shelf_sort_gesture", "on_key", "on_key_long", "draw_wrapped_name", "open_requested_book", "on_enter", "book_on_exit"):
     unit += function(name) + "\n"
 for name in ("book_remote_direction", "shelf_turn_page", "shelf_page_arrow_rect", "reader_swipe_direction"):
@@ -760,7 +771,7 @@ int main(void) {
     assert(bulk_turn_page(&ctx,1)==APP_REDRAW_NONE);
     EpdRect sort_name=bulk_sort_rect(0);
     assert(bulk_action(&ctx,sort_name.x+20,sort_name.y+20)==APP_REDRAW_PAGE&&selected_count()==1);
-    EpdRect sort_done=bulk_sort_rect(5);
+    EpdRect sort_done=bulk_sort_rect(6);
     assert(bulk_action(&ctx,sort_done.x+20,sort_done.y+20)==APP_REDRAW_PAGE&&!s_sort_menu&&selected_count()==1);
     assert(bulk_action(&ctx,600,267)==APP_REDRAW_PAGE&&!s_bulk_selecting&&!selected_count());
     assert(bulk_select_row(&ctx,0)==APP_REDRAW_PAGE);
