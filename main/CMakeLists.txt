@@ -107,6 +107,7 @@ kiiko_board_sources(kiiko_selected_sources "${CMAKE_CURRENT_LIST_DIR}" "app_main
         "apps/usb_storage.c"
         "book/book_store.c"
         "book/weread.c"
+        "book/weread_body_decode.c"
         "book/weread_protocol.c"
         "book/weread_epub.c"
         "book/book_xteink_sync.c"
