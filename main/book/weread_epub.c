@@ -418,6 +418,7 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
     s_cache_image_elapsed_us = 0;
     for (unsigned i = 0; ok && i < count && !wr_cancelled(); ++i) {
         int64_t chapter_started = esp_timer_get_time();
+        uint64_t image_before_us = s_cache_image_elapsed_us;
         size_t size = 0;
         bool plain = false;
         int64_t fetch_started = esp_timer_get_time();
@@ -454,7 +455,7 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
                  book->id, i+1, count, (unsigned)size,
                  (long long)((esp_timer_get_time() - fetch_started) / 1000),
                  (long long)(transform_us / 1000),
-                 (long long)(s_cache_image_elapsed_us / 1000),
+                 (long long)((s_cache_image_elapsed_us - image_before_us) / 1000),
                  (long long)((esp_timer_get_time()-chapter_started)/1000), ok);
         if (!ok && !wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
             wr_error_set("缓存失败：章节内容处理或图片下载失败");
@@ -471,6 +472,12 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             file_entry(&zip, "book.opf", opf, HTML_TEXT_MAX_BYTES) &&
             file_entry(&zip, "nav.xhtml", nav, HTML_TEXT_MAX_BYTES) && zip_finish(&zip);
     } else ok = false;
+    ESP_LOGI("WEREAD", "cache profile book=%s chapters=%u fetch_ms=%lld transform_ms=%lld image_ms=%lld chapter_wall_ms=%lld",
+             book->id, count,
+             (long long)(fetch_elapsed_us / 1000),
+             (long long)(transform_elapsed_us / 1000),
+             (long long)(s_cache_image_elapsed_us / 1000),
+             (long long)(chapter_elapsed_us / 1000));
 cleanup:
     if (nav) fclose(nav);
     if (opf) fclose(opf);
