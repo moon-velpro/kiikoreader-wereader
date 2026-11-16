@@ -136,6 +136,44 @@ static const char *image_extension(const char *data, size_t length, const char *
     return NULL;
 }
 
+/* Exact-source deduplication: only reuse images that have already been
+ * successfully added to this EPUB. Tokens remain in PSRAM and are never logged. */
+#define WR_IMAGE_REUSE_SLOTS 48
+typedef struct { char *url; char entry[40]; } wr_image_reuse_t;
+static EXT_RAM_BSS_ATTR wr_image_reuse_t s_image_reuse[WR_IMAGE_REUSE_SLOTS];
+static unsigned s_image_reuse_count, s_image_reuse_hits;
+
+static void image_reuse_reset(void) {
+    for (unsigned i = 0; i < s_image_reuse_count; ++i) {
+        free(s_image_reuse[i].url);
+        s_image_reuse[i].url = NULL;
+    }
+    s_image_reuse_count = 0;
+    s_image_reuse_hits = 0;
+}
+
+static bool image_reuse_find(const char *url, char name[40]) {
+    for (unsigned i = 0; i < s_image_reuse_count; ++i) {
+        if (!strcmp(url, s_image_reuse[i].url)) {
+            snprintf(name, 40, "%s", s_image_reuse[i].entry);
+            ++s_image_reuse_hits;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void image_reuse_add(const char *url, const char *name) {
+    if (s_image_reuse_count >= WR_IMAGE_REUSE_SLOTS) return;
+    size_t size = strlen(url) + 1;
+    char *copy = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) return; /* Deduplication is best-effort; preserve download path. */
+    memcpy(copy, url, size);
+    wr_image_reuse_t *slot = &s_image_reuse[s_image_reuse_count++];
+    slot->url = copy;
+    snprintf(slot->entry, sizeof(slot->entry), "%s", name);
+}
+
 static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t size, unsigned id, char name[40]) {
     if (!size || size >= 2048) { name[0] = 0; return !wr_cancelled(); }
     static EXT_RAM_BSS_ATTR char url[2056];
@@ -146,6 +184,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
         else url[used++] = src[i];
     }
     url[used] = 0;
+    if (image_reuse_find(url, name)) return !wr_cancelled();
     int64_t image_started = esp_timer_get_time();
     size_t length;
     char *data = NULL;
@@ -171,6 +210,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     s_cache_image_elapsed_us += (uint64_t)(esp_timer_get_time() - image_started);
     ESP_LOGI("WEREAD", "cache image id=%u bytes=%u elapsed_ms=%lld result=%d", id,
              (unsigned)length, (long long)((esp_timer_get_time() - image_started) / 1000), ok);
+    if (ok && ext) image_reuse_add(url, name);
     if (!ext) name[0] = 0;
     free(data);
     if (!ok) wr_error_set("缓存失败：图片写入 EPUB 失败");
@@ -407,6 +447,8 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         write_xml(opf, book->author, strlen(book->author)) &&
         fputs("</dc:creator><dc:language>zh</dc:language></metadata><manifest><item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>", opf) != EOF &&
         fputs("<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><body><nav epub:type=\"toc\"><ol>", nav) != EOF;
+    image_reuse_reset();
+    s_cache_image_elapsed_us = 0;
     if (ok && book->cover[0]) {
         char name[40];
         ok = image_entry(&zip, opf, book->cover, strlen(book->cover), 0, name);
@@ -415,7 +457,6 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
     uint64_t fetch_elapsed_us = 0;
     uint64_t transform_elapsed_us = 0;
     uint64_t chapter_elapsed_us = 0;
-    s_cache_image_elapsed_us = 0;
     for (unsigned i = 0; ok && i < count && !wr_cancelled(); ++i) {
         int64_t chapter_started = esp_timer_get_time();
         uint64_t image_before_us = s_cache_image_elapsed_us;
@@ -479,6 +520,9 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
              (long long)(s_cache_image_elapsed_us / 1000),
              (long long)(chapter_elapsed_us / 1000));
 cleanup:
+    ESP_LOGI("WEREAD", "cache image reuse hits=%u stored=%u",
+             s_image_reuse_hits, s_image_reuse_count);
+    image_reuse_reset();
     if (nav) fclose(nav);
     if (opf) fclose(opf);
     if (central) fclose(central);
