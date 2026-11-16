@@ -196,7 +196,9 @@ int main(void){uint8_t fb[1]={0};
    for(int i=0;i<4;++i){EpdRect a=rc_grid_rect(i);assert(a.y>=top+160&&a.y+a.height<done.y);for(int j=0;j<i;++j)assert(!overlap(a,rc_grid_rect(j)));}
    for(int i=0;i<3;++i){EpdRect a=rc_effect_rect(i);assert(a.y>=top+200&&a.y+a.height<done.y);for(int j=0;j<i;++j)assert(!overlap(a,rc_effect_rect(j)));}
    EpdRect refresh=rc_refresh_rect();assert(refresh.y>=top+200&&refresh.y+refresh.height<done.y);
-   for(int i=0;i<2;++i){EpdRect a=rc_auto_card(i);assert(a.y>=top+300&&a.y+a.height<done.y);EpdRect step=rc_interval_rect(i);assert(step.x>=a.x&&step.y>=a.y&&step.x+step.width<=a.x+a.width&&step.y+step.height<=a.y+a.height);}
+   for(int i=0;i<2;++i){EpdRect a=rc_auto_card(i);assert(a.y>=top+300&&a.y+a.height<done.y);for(int j=0;j<i;++j)assert(!overlap(a,rc_auto_card(j)));}
+   EpdRect interval_card=rc_auto_card(1);
+   for(unsigned plus=0;plus<2;++plus){EpdRect step=rc_interval_rect(plus);assert(step.x>=interval_card.x&&step.y>=interval_card.y&&step.x+step.width<=interval_card.x+interval_card.width&&step.y+step.height<=interval_card.y+interval_card.height);}
    for(int i=0;i<4;++i){EpdRect a=rc_display_rect(i);assert(a.y>=top+200&&a.y+a.height<done.y);for(int j=0;j<i;++j)assert(!overlap(a,rc_display_rect(j)));}
    for(int i=0;i<9;++i){EpdRect a=reader_font_pick_rect(i);assert(a.y>reader_font_picker_top()+120&&a.y+a.height<1141);for(int j=0;j<i;++j)assert(!overlap(a,reader_font_pick_rect(j)));}
    for(int edit=0;edit<2;++edit){s_bookmark_edit=edit;assert(bookmark_rows()>=3);for(int row=0;row<bookmark_rows();++row){EpdRect a=bookmark_row_rect(row);assert(a.y+a.height<=560+(edit?520:600));if(row)assert(!overlap(a,bookmark_row_rect(row-1)));}}
