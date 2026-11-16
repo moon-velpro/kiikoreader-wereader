@@ -236,12 +236,12 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     }
     size_t image_limit = 4u * 1024u * 1024u;
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (free_psram <= 256u * 1024u) {
+    image_limit = free_psram / 2u; /* do not starve a concurrent next-chapter prefetch */
+    if (image_limit > 4u * 1024u * 1024u) image_limit = 4u * 1024u * 1024u;
+    if (image_limit < 64u * 1024u) {
         name[0] = 0;
         return !wr_cancelled();
     }
-    if (image_limit > free_psram - 256u * 1024u)
-        image_limit = free_psram - 256u * 1024u;
     for (unsigned attempt = 0; attempt < 3 && !data && !wr_cancelled(); ++attempt) {
         data = wr_http(url, NULL, NULL, image_limit, &length);
         if (!data && !strcmp(wr_error_message(), "微信读书图片地址不受支持")) break;
@@ -351,8 +351,7 @@ static char *cache_fetch_tar(const wr_book_t *book, const wr_chapter_t *chapter,
     if (n <= 0 || n >= (int)sizeof(tar_url) ||
         !wr_reader_referer(book->id, chapter->id, reader_referer)) return NULL;
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (free_psram <= 1024u * 1024u) return NULL;
-    size_t limit = free_psram - 1024u * 1024u; /* retain a hard 1 MiB runtime reserve */
+    size_t limit = free_psram / 2u; /* leave half the live PSRAM for chapter buffers and UI */
     if (limit > WR_IMG_TAR_LIMIT) limit = WR_IMG_TAR_LIMIT;
     if (limit < 128u * 1024u) return NULL;
     int64_t started = esp_timer_get_time();
