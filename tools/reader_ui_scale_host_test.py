@@ -187,7 +187,9 @@ int main(void){uint8_t fb[1]={0};
    s_rc_tab=1;draw_reading_settings(fb);
    s_rc_tab=2;draw_reading_settings(fb);
    rc_draw_display(fb);
-   reading_probe=false;assert(reading_labels==511&&reading_switches==5&&reading_settings_top()==top);
+   reading_probe=false;
+   fprintf(stderr,"READER_UI_SCALE face=%d scale=%d labels=0x%x switches=%d top=%d expected_top=%d\\n",face,scale,reading_labels,reading_switches,reading_settings_top(),top);
+   assert(reading_labels==511&&reading_switches==5&&reading_settings_top()==top);
    EpdRect done=rc_done_rect();assert(done.x==36&&done.y==1141&&done.width==612&&done.height==58);
    for(int i=0;i<3;++i){EpdRect a=rc_tab_rect(i);assert(a.y==top+100&&a.y+a.height<done.y);for(int j=0;j<i;++j)assert(!overlap(a,rc_tab_rect(j)));}
    for(int i=0;i<4;++i){EpdRect a=rc_grid_rect(i);assert(a.y>=top+160&&a.y+a.height<done.y);for(int j=0;j<i;++j)assert(!overlap(a,rc_grid_rect(j)));}
