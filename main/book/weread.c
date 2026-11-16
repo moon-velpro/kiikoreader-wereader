@@ -906,8 +906,21 @@ static char *http_request(const char *url, const char *body, const char *referer
             }
             size_t remaining = limit - used;
             if (!remaining) {
+                /* A compressed response can legitimately end at exactly limit.
+                 * Finalize it without reading a byte past the allowed limit. */
                 complete = esp_http_client_is_complete_data_received(http);
-                if (!complete) read_failed = true;
+                if (!complete || wr_body_decoder_finish(shard_decoder) != 0 ||
+                    !shard_sink.data) {
+                    complete = false;
+                    read_failed = true;
+                } else {
+                    size_t wire_bytes = used;
+                    data = shard_sink.data;
+                    shard_sink.data = NULL;
+                    used = shard_sink.used;
+                    ESP_LOGI("WEREAD", "chapter shard decoded wire=%u bytes=%u",
+                             (unsigned)wire_bytes, (unsigned)used);
+                }
                 break;
             }
             int n = esp_http_client_read(http, shard_input,
