@@ -13,6 +13,7 @@ unit=r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+typedef int e0470_turn_dir_t;
 typedef struct {int x,y,width,height;} EpdRect;
 typedef struct {void *hl;uint8_t *fb;int64_t now_ms;bool request_app;} app_ctx_t;
 typedef enum {APP_REDRAW_NONE,APP_REDRAW_AREA,APP_REDRAW_PAGE,APP_REDRAW_FULL,APP_REDRAW_DONE} app_redraw_t;
@@ -121,8 +122,8 @@ for name in ('reader_area','reader_fullscreen_progress_area','progress_rect'):
 unit+='static enum EpdDrawError reader_present_crop(void *hl,const EpdWaveform *wave,int mode,EpdRect area,bool full){return full?update_display_area_full_with(hl,wave,mode,area):update_display_area_diff_with(hl,wave,mode,area); }\n'
 unit+=function('reader_soft_present',root/'main/apps/app_book.c')+'\n'
 unit+=function('reader_image_present',root/'main/apps/app_book.c')+'\n'
-unit+=function('reader_text_effect_present',root/'main/apps/app_book.c')+'\\n'
-unit+=function('present_book_frame',root/'main/apps/app_book.c')+'\\n'
+unit+=function('reader_text_effect_present',root/'main/apps/app_book.c')+'\n'
+unit+=function('present_book_frame',root/'main/apps/app_book.c')+'\n'
 unit+=function('present',root/'main/apps/app_book.c')
 unit+=r'''
 static void reset(void){
