@@ -88,8 +88,8 @@ static struct {
     wr_reader_t fields;
     int64_t expires;
 } s_report_fields;
-// Each HTTP request owns redirect and cookie-capture state, so bounded cache
-// prefetch requests can overlap without corrupting one another.
+// Each HTTP request owns its redirect and cookie-capture state. The cache
+// worker currently serializes requests; no shared per-request buffers are assumed.
 typedef struct {
     char absolute[WR_HTTP_URL_BYTES];
     char redirected[WR_HTTP_URL_BYTES];
