@@ -145,6 +145,15 @@ static bool cover_redirect_url(const char *current, const char *location,
                                char out[WR_HTTP_URL_BYTES]);
 static bool renew_session(void);
 
+static bool http_url_is_login(const char *url) {
+    return url && !strncmp(url, "/api/auth/", sizeof("/api/auth/") - 1);
+}
+
+static bool http_url_requires_session(const char *url) {
+    return url && url[0] == '/' && !http_url_is_login(url) &&
+        strcmp(url, "/web/login/renewal");
+}
+
 const char *wr_error_message(void) { return atomic_load(&s_error_message); }
 void wr_error_set(const char *message) { if (message && *message) atomic_store(&s_error_message, message); }
 const char *wr_result_message(void) {
@@ -823,7 +832,8 @@ static char *http_request(const char *url, const char *body, const char *referer
     s_http_open_failed = false;
     if (wr_cancelled()) { s_error_message = "操作已取消"; return NULL; }
     if (!wr_online()) { http_keepalive_drop(); s_error_message = "Wi-Fi 未连接或网络尚未就绪"; return NULL; }
-    if (url[0] == '/') restore_session_cookie();
+    const bool login_endpoint = http_url_is_login(url);
+    if (url[0] == '/' && !login_endpoint) restore_session_cookie();
     wr_http_context_t *request = heap_caps_calloc(1, sizeof(*request), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!request) { s_error_message = "内存不足，无法创建微信读书请求"; return NULL; }
     char *absolute = request->absolute;
@@ -962,7 +972,10 @@ static char *http_request(const char *url, const char *body, const char *referer
         esp_http_client_close(http);
         ++redirects;
     }
-    if (service && (code == 401 || code == 403)) { s_expired = true; s_error_message = "登录已失效，请重新扫码"; }
+    if (service && !login_endpoint && (code == 401 || code == 403)) {
+        s_expired = true;
+        s_error_message = "登录已失效，请重新扫码";
+    }
     else if (code < 200 || code >= 300) s_error_message = "微信读书接口返回错误";
     if ((declared < 0 && !esp_http_client_is_chunked_response(http)) ||
         (declared > 0 && (uint64_t)declared > limit) || code != 200) goto cleanup;
@@ -992,7 +1005,8 @@ static char *http_request(const char *url, const char *body, const char *referer
             int n = esp_http_client_read(http, data, (int)(remaining < 2048 ? remaining : 2048));
             if (n < 0) { read_failed = true; goto cleanup; }
             used += (size_t)n;
-            if (n > 0 && service && wr_http_auth_scan_chunk(&request->auth_scan, data, (size_t)n)) {
+            if (n > 0 && service && !login_endpoint &&
+                wr_http_auth_scan_chunk(&request->auth_scan, data, (size_t)n)) {
                 s_expired = true;
                 s_error_message = "登录已失效，请重新扫码";
             }
@@ -1056,8 +1070,7 @@ cleanup:
 static char *http_request_with_session(const char *url, const char *body, const char *referer, size_t limit,
                                         size_t *length, wr_http_chunk_fn chunk, void *context,
                                         bool *fields_received, bool *post_started) {
-    const bool renewal = url && !strcmp(url, "/web/login/renewal");
-    const bool service = url && url[0] == '/' && !renewal;
+    const bool service = http_url_requires_session(url);
     char *data = http_request(url, body, referer, limit, length, chunk, context,
                               fields_received, post_started);
     if (service && data && wr_http_body_session_expired(data)) {
@@ -1170,8 +1183,9 @@ static cJSON *wr_json_limit(const char *url, const char *body, size_t limit) {
     if (!json) { s_error_message = "书架数据解析失败"; return NULL; }
     const cJSON *error = cJSON_GetObjectItemCaseSensitive(json, "errcode");
     if (!error) error = cJSON_GetObjectItemCaseSensitive(json, "errCode");
-    if ((cJSON_IsNumber(error) && error->valueint == -2012) ||
-        (cJSON_IsString(error) && !strcmp(error->valuestring, "-2012"))) s_expired = true;
+    if (http_url_requires_session(url) &&
+        ((cJSON_IsNumber(error) && error->valueint == -2012) ||
+         (cJSON_IsString(error) && !strcmp(error->valuestring, "-2012")))) s_expired = true;
     return json;
 }
 
