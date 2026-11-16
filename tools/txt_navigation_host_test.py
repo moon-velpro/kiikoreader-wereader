@@ -47,7 +47,7 @@ bool book_index_cache_prepare_file(const char *source,const char *tag,uint32_t v
  if(disable_cache)return false;
  assert((!strcmp(tag,"txt")&&version==5)||(!strcmp(tag,"chapters")&&version==1));
  *key=(book_index_cache_header_t){.magic=123,.version=version,.source_size=(uint32_t)size,.modified=modified,.path_hash=456};
- return (size_t)snprintf(path,cap,"%s.idx",source)<cap;
+ return (size_t)snprintf(path,cap,"%s%s.idx",source,!strcmp(tag,"txt")?"":".chapters")<cap;
 }
 bool book_index_cache_prepare(const char *source,const char *tag,uint32_t version,char *path,size_t cap,book_index_cache_header_t *key){
  struct stat st;assert(!stat(source,&st));
