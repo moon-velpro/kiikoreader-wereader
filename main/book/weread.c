@@ -1037,6 +1037,9 @@ static char *http_request_with_session(const char *url, const char *body, const 
         s_expired = true;
         s_error_message = "登录已失效，请重新扫码";
     }
+    /* A second explicit auth rejection is still a known rejection, not an
+     * ambiguous POST outcome. Preserve the queued duration for a later retry. */
+    if (service && s_expired && post_started) *post_started = false;
     return data;
 }
 
