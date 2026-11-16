@@ -18,6 +18,7 @@
 #include "ui_root_style.h"
 #include "ui_wifi_qr.h"
 #include "weread.h"
+#include "weread_progress_policy.h"
 
 extern const app_desc_t app_book, app_transfer;
 
@@ -415,7 +416,11 @@ static app_redraw_t tick(app_ctx_t *ctx) {
             if (*qr) (void)ui_wifi_qr_prepare_text(qr);
             return APP_REDRAW_PAGE;
         }
-        if (done != s_done || total != s_total) { s_done=done; s_total=total; return APP_REDRAW_PAGE; }
+        if (weread_progress_should_redraw(s_done, s_total, done, total, s_job == WR_CACHE)) {
+            s_done = done;
+            s_total = total;
+            return APP_REDRAW_PAGE;
+        }
         return APP_REDRAW_NONE;
     }
     if (status == WR_EXPIRED && s_logged) {
