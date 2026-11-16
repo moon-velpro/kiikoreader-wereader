@@ -92,6 +92,17 @@ ESP-IDF lwIP guidance recommends changing one parameter at a time, considering T
 5. Only if panel blocking appears on the critical path: evaluate partial DU refresh with completion-frame arbitration and UNDERRUN monitoring.
 6. Keep a byte-identical output/EPUB validation test alongside speed measurements.
 
+## Device benchmark log analysis
+
+After capturing a serial log from the same 32-chapter / image-heavy test book, summarize it with:
+
+```sh
+python3 tools/weread_perf_log_summary.py run-before.log run-after.log
+python3 tools/weread_perf_log_summary.py --json run-after.log
+```
+
+Compare the per-book `fetch_ms`, `transform_ms`, `image_ms`, and `chapter_wall_ms` fields; TAR bytes/latency and TAR-hit versus individual-fallback counts; prefetch bundle hits/wait; and shard Keep-Alive hits/fallbacks. Image time is nested inside transform time and must not be added to it.
+
 ## Acceptance gates
 
 - No change to default radio settings, TLS concurrency, or CDN allowlist in this patch.
