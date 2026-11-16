@@ -34,6 +34,8 @@
 #include "settings.h"
 
 #define WR_MAX_SHELF 8192
+#define WR_REPORT_COUNT 16
+#define WR_REPORT_STORE_MAGIC UINT32_C(0x57525231)
 #define WR_INDEX WR_DIR "/shelf.bin"
 #define WR_INDEX_TEMP WR_DIR "/shelf.part"
 #define WR_CACHED WR_DIR "/cached.bin"
@@ -55,6 +57,15 @@ typedef struct {
     unsigned failures;
     int64_t retry_at;
 } wr_report_t;
+typedef struct {
+    char book_id[WR_ID], owner[WR_ID];
+    uint32_t library, seconds;
+} wr_report_store_entry_t;
+typedef struct {
+    uint32_t magic;
+    wr_report_store_entry_t entries[WR_REPORT_COUNT];
+} wr_report_store_t;
+_Static_assert(sizeof(wr_report_store_t) <= 1900, "WeRead report queue must fit in one NVS blob");
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 enum { WR_WORKER_STACK_BYTES = 16 * 1024, WR_HTTP_URL_BYTES = 2080 };
@@ -63,7 +74,7 @@ static DRAM_ATTR StackType_t s_worker_stack[WR_WORKER_STACK_BYTES / sizeof(Stack
 static DRAM_ATTR StaticTask_t s_worker_tcb;
 static TaskHandle_t s_worker;
 static wr_work_t s_work;
-static wr_report_t s_reports[8];
+static wr_report_t s_reports[WR_REPORT_COUNT];
 static bool s_work_pending;
 static bool s_processing_report;
 static bool s_reader_scanning;
@@ -93,6 +104,8 @@ typedef struct {
 } wr_http_context_t;
 static StaticSemaphore_t s_cookie_mutex_storage;
 static SemaphoreHandle_t s_cookie_mutex;
+static StaticSemaphore_t s_report_store_mutex_storage;
+static SemaphoreHandle_t s_report_store_mutex;
 static wr_result_t s_result;
 static wr_job_t s_active_job;
 static atomic_bool s_cancel;
@@ -166,6 +179,77 @@ static void cookie_lock(void) {
 
 static void cookie_unlock(void) {
     if (s_cookie_mutex) (void)xSemaphoreGive(s_cookie_mutex);
+}
+
+/* Persist only the durable queue payload. Monotonic retry deadlines are rebuilt
+ * after boot, so no stale esp_timer_get_time() values enter NVS. */
+static bool persist_report_queue(void) {
+    if (!s_report_store_mutex ||
+        xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) != pdTRUE) return false;
+
+    wr_report_store_t snapshot = {.magic = WR_REPORT_STORE_MAGIC};
+    bool any = false;
+    portENTER_CRITICAL(&s_lock);
+    for (unsigned i = 0; i < WR_REPORT_COUNT; ++i) {
+        const wr_report_t *source = &s_reports[i];
+        if (!source->seconds) continue;
+        wr_report_store_entry_t *target = &snapshot.entries[i];
+        memcpy(target->book_id, source->book_id, sizeof(target->book_id));
+        memcpy(target->owner, source->owner, sizeof(target->owner));
+        target->library = source->library;
+        target->seconds = source->seconds;
+        any = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+
+    nvs_handle_t nvs;
+    esp_err_t result = nvs_open("weread", NVS_READWRITE, &nvs);
+    if (result == ESP_OK) {
+        if (any) result = nvs_set_blob(nvs, "reports", &snapshot, sizeof(snapshot));
+        else {
+            result = nvs_erase_key(nvs, "reports");
+            if (result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
+        }
+        if (result == ESP_OK) result = nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    (void)xSemaphoreGive(s_report_store_mutex);
+    return result == ESP_OK;
+}
+
+static void load_report_queue(void) {
+    if (!s_report_store_mutex) return;
+    nvs_handle_t nvs;
+    if (nvs_open("weread", NVS_READONLY, &nvs) != ESP_OK) return;
+
+    wr_report_store_t stored;
+    size_t size = sizeof(stored);
+    esp_err_t result = nvs_get_blob(nvs, "reports", &stored, &size);
+    nvs_close(nvs);
+    if (result == ESP_ERR_NVS_NOT_FOUND) return;
+    if (result != ESP_OK || size != sizeof(stored) || stored.magic != WR_REPORT_STORE_MAGIC) {
+        ESP_LOGW("WEREAD", "discard invalid persisted report queue err=%s size=%u",
+                 esp_err_to_name(result), (unsigned)size);
+        return;
+    }
+
+    unsigned loaded = 0;
+    for (unsigned i = 0; i < WR_REPORT_COUNT; ++i) {
+        const wr_report_store_entry_t *source = &stored.entries[i];
+        if (!source->seconds ||
+            !memchr(source->book_id, 0, sizeof(source->book_id)) ||
+            !memchr(source->owner, 0, sizeof(source->owner)) ||
+            !wr_safe(source->book_id) || !wr_safe(source->owner)) continue;
+        wr_report_t *target = &s_reports[i];
+        memcpy(target->book_id, source->book_id, sizeof(target->book_id));
+        memcpy(target->owner, source->owner, sizeof(target->owner));
+        target->library = source->library;
+        target->seconds = source->seconds;
+        target->failures = 0;
+        target->retry_at = 0;
+        ++loaded;
+    }
+    if (loaded) ESP_LOGI("WEREAD", "restored pending report queue entries=%u", loaded);
 }
 
 static bool clear_session_cookies(void) {
@@ -1725,6 +1809,8 @@ static void process_report(unsigned slot, const wr_report_t *job) {
     }
     unsigned remaining = pending->seconds;
     portEXIT_CRITICAL(&s_lock);
+    if (!persist_report_queue())
+        ESP_LOGW("WEREAD", "persist report queue failed after result=%d", result);
     const char *outcome = result == REPORT_CONFIRMED ? "confirmed" :
         result == REPORT_RETRY ? "retry" : result == REPORT_UNKNOWN ? "unknown" : "account_changed";
     ESP_LOGI("WEREAD", "report result=%s stage=%s seconds=%u pending=%u",
@@ -1775,6 +1861,10 @@ void wr_init(void) {
         ESP_LOGE("WEREAD", "cookie mutex initialization failed");
         return;
     }
+    if (!s_report_store_mutex)
+        s_report_store_mutex = xSemaphoreCreateMutexStatic(&s_report_store_mutex_storage);
+    if (s_report_store_mutex) load_report_queue();
+    else ESP_LOGE("WEREAD", "report queue persistence mutex initialization failed");
     s_worker = xTaskCreateStatic(worker_task, "weread", sizeof(s_worker_stack),
                                  NULL, 2, s_worker_stack, &s_worker_tcb);
     if (s_worker) ESP_LOGI("WEREAD", "worker ready stack=%u", (unsigned)sizeof(s_worker_stack));
@@ -1783,6 +1873,11 @@ void wr_init(void) {
 
 void wr_reading_start(const char *path, bool enabled, int64_t now_ms) {
     wr_reading_stop(true);
+    if (s_reading.ms >= 1000) {
+        ESP_LOGW("WEREAD", "new reading timer deferred; previous report is still pending seconds=%u",
+                 s_reading.ms / 1000);
+        return;
+    }
     if (!enabled || !wr_reporting_book(path, &s_reading.book)) return;
     wr_account_t account;
     if (!read_account(&account) || !account.token[0]) { memset(&s_reading, 0, sizeof(s_reading)); return; }
@@ -1794,15 +1889,16 @@ void wr_reading_start(const char *path, bool enabled, int64_t now_ms) {
     radio_hold(true);
 }
 
-static void report_reading(void) {
+static bool report_reading(void) {
     const unsigned seconds = s_reading.ms / 1000;
-    if (!seconds || !s_reading.owner[0] || !s_worker) return;
+    if (!seconds) return true;
+    if (!s_reading.owner[0] || !s_worker) return false;
     wr_report_t job = { .library = s_reading.library, .seconds = seconds };
     memcpy(job.book_id, s_reading.book.id, sizeof(job.book_id));
     memcpy(job.owner, s_reading.owner, sizeof(job.owner));
     portENTER_CRITICAL(&s_lock);
     wr_report_t *empty = NULL, *entry = NULL;
-    for (unsigned i = 0; i < sizeof(s_reports)/sizeof(s_reports[0]); ++i) {
+    for (unsigned i = 0; i < WR_REPORT_COUNT; ++i) {
         if (!s_reports[i].seconds) {
             if (!empty) empty = &s_reports[i];
         } else if (same_report_book(&job, &s_reports[i])) {
@@ -1814,18 +1910,25 @@ static void report_reading(void) {
     if (entry && seconds <= UINT32_MAX - entry->seconds) {
         entry->seconds += seconds;
         accepted = true;
-    } else if (!entry && empty) {
+    } else if (empty) {
         *empty = job;
         accepted = true;
     }
     portEXIT_CRITICAL(&s_lock);
-    if (!accepted) return;
+    if (!accepted) return false;
     s_reading.ms %= 1000;
+    if (!persist_report_queue())
+        ESP_LOGW("WEREAD", "persist pending reading report failed seconds=%u", seconds);
     xTaskNotifyGive(s_worker);
+    return true;
 }
 
 void wr_reading_tick(bool active, int64_t now_ms) {
-    if (!s_reading.attached) return;
+    if (!s_reading.attached) {
+        if (s_reading.ms >= 1000 && report_reading() && s_reading.ms < 1000)
+            memset(&s_reading, 0, sizeof(s_reading));
+        return;
+    }
     if (!s_reading.last) { s_reading.last = now_ms; return; }
     int64_t elapsed = now_ms - s_reading.last;
     s_reading.last = now_ms;
@@ -1837,9 +1940,16 @@ void wr_reading_tick(bool active, int64_t now_ms) {
 }
 
 void wr_reading_stop(bool close) {
-    if (s_reading.attached) report_reading();
-    if (close && s_reading.ms >= 1000)
-        ESP_LOGW("WEREAD", "report queue unavailable at close seconds=%u", s_reading.ms / 1000);
+    bool queued = true;
+    if (s_reading.attached || s_reading.ms >= 1000) queued = report_reading();
+    if (close && s_reading.ms >= 1000 && !queued) {
+        ESP_LOGW("WEREAD", "report queue full; retaining pending reading seconds=%u",
+                 s_reading.ms / 1000);
+        s_reading.attached = false;
+        s_reading.last = 0;
+        radio_hold(false);
+        return;
+    }
     radio_hold(false);
     s_reading.last = 0;
     if (close) memset(&s_reading, 0, sizeof(s_reading));
