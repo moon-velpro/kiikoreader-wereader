@@ -40,8 +40,8 @@ static inline const char *wr_http_find_json_key(const char *body, size_t length,
 static inline bool wr_http_body_session_expired_n(const char *body, size_t length) {
     if (!body || !length) return false;
     const char *end = body + length;
-    const char *key = wr_http_find_json_key(body, length, "\\"errcode\\"", 9);
-    const char *alternate = wr_http_find_json_key(body, length, "\\"errCode\\"", 9);
+    const char *key = wr_http_find_json_key(body, length, "\"errcode\"", 9);
+    const char *alternate = wr_http_find_json_key(body, length, "\"errCode\"", 9);
     if (!key || (alternate && alternate < key)) key = alternate;
     if (!key) return false;
 
