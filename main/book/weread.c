@@ -72,6 +72,10 @@ static bool s_reader_scanning;
 static int64_t s_reader_scan_end;
 static esp_http_client_handle_t s_http_keepalive;
 static char s_http_keepalive_host[128];
+/* Aggressive cache-only POST shard reuse; trip the breaker on the first
+ * unexpected response and fall back to the tested streaming implementation. */
+static bool s_http_shard_fast_disabled;
+static unsigned s_http_shard_fast_hits, s_http_shard_fast_fallbacks;
 static struct {
     wr_report_t account_book;
     char chapter[WR_ID];
@@ -468,7 +472,9 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
     esp_http_client_delete_all_headers(http);
     esp_http_client_reset_redirect_counter(http);
     esp_http_client_set_method(http, body ? HTTP_METHOD_POST : HTTP_METHOD_GET);
-    esp_http_client_set_header(http, "Accept-Encoding", "identity");
+    esp_http_client_set_header(http, "Accept-Encoding",
+                               service && !strncmp(url, "/web/book/chapter/", 18)
+                                   ? "gzip" : "identity");
     esp_http_client_set_header(http, "Referer", referer ? referer : WR_HOST "/");
     if (service) {
         esp_http_client_set_header(http, "Accept", "application/json, text/plain, */*");
@@ -708,6 +714,57 @@ static char *http_request(const char *url, const char *body, const char *referer
     if (url[0] == '/') restore_session_cookie();
     wr_http_context_t *request = heap_caps_calloc(1, sizeof(*request), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!request) { s_error_message = "内存不足，无法创建微信读书请求"; return NULL; }
+    /* Reuse a single host-scoped TLS handle across the small e_/t_ POST shards.
+     * Only the cache job enters this path. A failed request is replayed once via
+     * the pre-existing open/fetch/read path, then fast reuse stays disabled for
+     * the remainder of the cache job. Reader streaming remains unchanged. */
+    bool try_fast = s_active_job == WR_CACHE && !chunk && !post_started &&
+        !s_http_shard_fast_disabled && !strncmp(url, "/web/book/chapter/", 18);
+    if (try_fast) {
+        size_t fast_size = 0;
+        char *fast = http_request_reusable(request, url, body, referer, limit,
+                                            &fast_size, NULL);
+        if (fast) {
+            bool packed = fast_size >= 2 &&
+                          (uint8_t)fast[0] == 0x1f && (uint8_t)fast[1] == 0x8b;
+            if (!packed) {
+                if (length) *length = fast_size;
+                free(request);
+                ++s_http_shard_fast_hits;
+                return fast;
+            }
+            wr_body_buffer_t decoded = {.limit = limit, .resize = wr_shard_resize};
+            wr_body_decoder_t *inflate = heap_caps_malloc(sizeof(*inflate),
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            int result = -1;
+            if (inflate) {
+                wr_body_decoder_init(inflate, wr_body_buffer_write, &decoded, limit,
+                                     wr_reader_zalloc, wr_reader_zfree);
+                result = wr_body_decoder_feed(inflate, fast, fast_size);
+                if (result == 0) result = wr_body_decoder_finish(inflate);
+                wr_body_decoder_close(inflate);
+                free(inflate);
+            }
+            free(fast);
+            if (result == 0 && !decoded.failed && decoded.data) {
+                if (length) *length = decoded.used;
+                free(request);
+                ++s_http_shard_fast_hits;
+                return decoded.data;
+            }
+            free(decoded.data);
+        }
+        free(request->body_data);
+        request->body_data = NULL;
+        s_http_shard_fast_disabled = true;
+        ++s_http_shard_fast_fallbacks;
+        http_keepalive_drop();
+        if (s_expired || wr_cancelled()) {
+            free(request);
+            return NULL;
+        }
+        ESP_LOGW("WEREAD", "cache shard keep-alive disabled: fallback to safe request path");
+    }
     char *absolute = request->absolute;
     const bool service = url[0] == '/';
     const bool compressed_shard = !chunk && service &&
@@ -1554,6 +1611,10 @@ static void run_work(const wr_work_t *work) {
     const int64_t work_started_us = esp_timer_get_time();
     bool ok = false;
     const bool cache_radio_boost = work->kind == WR_CACHE && wr_online();
+    if (work->kind == WR_CACHE) {
+        s_http_shard_fast_disabled = false;
+        s_http_shard_fast_hits = s_http_shard_fast_fallbacks = 0;
+    }
     if (cache_radio_boost) {
         radio_hold(true);
         ESP_LOGI("WEREAD", "cache radio performance mode enabled");
@@ -1611,6 +1672,12 @@ static void run_work(const wr_work_t *work) {
     } else if (!wr_cancelled()) {
         s_error_message = "登录已失效，请重新扫码";
         s_expired = true;
+    }
+    if (work->kind == WR_CACHE) {
+        ESP_LOGI("WEREAD", "cache shard keep-alive hits=%u fallbacks=%u disabled=%d",
+                 s_http_shard_fast_hits, s_http_shard_fast_fallbacks,
+                 (int)s_http_shard_fast_disabled);
+        http_keepalive_drop();
     }
     if (cache_radio_boost) {
         radio_hold(false);
