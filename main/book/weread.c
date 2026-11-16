@@ -1,5 +1,6 @@
 #include "weread_internal.h"
 #include "weread_http_log.h"
+#include "weread_http_auth.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -101,8 +102,7 @@ typedef struct {
     bool *post_started;
     size_t body_limit, body_used, body_capacity;
     char *body_data;
-    char auth_tail[64];
-    size_t auth_tail_length;
+    wr_http_auth_scan_t auth_scan;
 } wr_http_context_t;
 static StaticSemaphore_t s_cookie_mutex_storage;
 static SemaphoreHandle_t s_cookie_mutex;
@@ -702,59 +702,6 @@ static bool wr_url_allowed(const char *url, bool service) {
     return false;
 }
 
-static const char *find_bytes(const char *data, size_t length,
-                              const char *needle, size_t needle_length) {
-    if (!data || needle_length > length) return NULL;
-    for (size_t i = 0; i + needle_length <= length; ++i)
-        if (!memcmp(data + i, needle, needle_length)) return data + i;
-    return NULL;
-}
-
-static bool http_body_session_expired_n(const char *body, size_t length) {
-    if (!body || !length) return false;
-    const char *end = body + length;
-    const char *key = find_bytes(body, length, "\"errcode\"", 9);
-    const char *alternate = find_bytes(body, length, "\"errCode\"", 9);
-    if (!key || (alternate && alternate < key)) key = alternate;
-    if (!key) return false;
-    const char *value = memchr(key, ':', (size_t)(end - key));
-    if (!value) return false;
-    ++value;
-    while (value < end && isspace((unsigned char)*value)) ++value;
-    bool quoted = value < end && *value == '"';
-    if (quoted) ++value;
-    if ((size_t)(end - value) < 5 || memcmp(value, "-2012", 5)) return false;
-    value += 5;
-    return quoted ? (value < end && *value == '"') :
-        (value == end || *value == ',' || *value == '}' || isspace((unsigned char)*value));
-}
-
-static bool http_body_session_expired(const char *body) {
-    return body && http_body_session_expired_n(body, strlen(body));
-}
-
-/* The reader-fields path reuses a small buffer for each chunk. Keep a short
- * tail so an errcode/value split at a transport boundary is still detected. */
-static bool http_body_session_expired_chunk(wr_http_context_t *request,
-                                            const char *data, size_t length) {
-    if (!request || !data || !length) return false;
-    if (http_body_session_expired_n(data, length)) return true;
-
-    char prefix[128];
-    size_t tail = request->auth_tail_length;
-    if (tail > sizeof(prefix) - 1) tail = sizeof(prefix) - 1;
-    size_t take = length;
-    if (take > sizeof(prefix) - tail - 1) take = sizeof(prefix) - tail - 1;
-    memcpy(prefix, request->auth_tail, tail);
-    memcpy(prefix + tail, data, take);
-    if (http_body_session_expired_n(prefix, tail + take)) return true;
-
-    size_t keep = length < sizeof(request->auth_tail) ? length : sizeof(request->auth_tail);
-    memcpy(request->auth_tail, data + length - keep, keep);
-    request->auth_tail_length = keep;
-    return false;
-}
-
 static void log_rejected_image_url(const char *url) {
     const char *scheme = url ? strstr(url, "://") : NULL;
     const char *host = scheme ? scheme + 3 : (url ? url : "");
@@ -1002,7 +949,7 @@ static char *http_request(const char *url, const char *body, const char *referer
             int n = esp_http_client_read(http, data, (int)(remaining < 2048 ? remaining : 2048));
             if (n < 0) { read_failed = true; goto cleanup; }
             used += (size_t)n;
-            if (n > 0 && service && http_body_session_expired_chunk(request, data, (size_t)n)) {
+            if (n > 0 && service && wr_http_auth_scan_chunk(&request->auth_scan, data, (size_t)n)) {
                 s_expired = true;
                 s_error_message = "登录已失效，请重新扫码";
             }
@@ -1070,7 +1017,7 @@ static char *http_request_with_session(const char *url, const char *body, const 
     const bool service = url && url[0] == '/' && !renewal;
     char *data = http_request(url, body, referer, limit, length, chunk, context,
                               fields_received, post_started);
-    if (service && data && http_body_session_expired(data)) {
+    if (service && data && wr_http_body_session_expired(data)) {
         free(data);
         data = NULL;
         s_expired = true;
@@ -1086,7 +1033,7 @@ static char *http_request_with_session(const char *url, const char *body, const 
     if (!renew_session()) return NULL;
     data = http_request(url, body, referer, limit, length, chunk, context,
                         fields_received, post_started);
-    if (service && data && http_body_session_expired(data)) {
+    if (service && data && wr_http_body_session_expired(data)) {
         s_expired = true;
         s_error_message = "登录已失效，请重新扫码";
     }
