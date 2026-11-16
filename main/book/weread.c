@@ -1934,9 +1934,10 @@ static bool report_reading(void) {
     portEXIT_CRITICAL(&s_lock);
     if (!accepted) return false;
     s_reading.ms %= 1000;
-    if (!s_reading.attached && s_deferred_reading.milliseconds) {
+    if (!s_reading.attached) {
         portENTER_CRITICAL(&s_lock);
-        if (s_deferred_reading.library == job.library &&
+        if (s_deferred_reading.milliseconds &&
+            s_deferred_reading.library == job.library &&
             !strcmp(s_deferred_reading.owner, job.owner) &&
             !strcmp(s_deferred_reading.book_id, job.book_id))
             memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
