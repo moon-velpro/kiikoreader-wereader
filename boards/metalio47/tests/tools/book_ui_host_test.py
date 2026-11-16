@@ -109,6 +109,10 @@ typedef struct {uint32_t magic,file_size;uint16_t count,reserved;char path[288];
 #define BOOK_STORE_PATH_MAX 288
 #define UI_BTN_H 84
 #define UI_GAP 12
+#ifndef UI_MARGIN
+#define UI_MARGIN 40
+#endif
+static int ui_content_width(void){return UI_LOCK_WIDTH-2*UI_MARGIN;}
 static EpdRect ui_row_rect(int i,int count,int y,int height){EpdRect r=ui_bar_rect(i,count);r.y=y;r.height=height;return r;}
 static char s_query[65],s_search_draft[65],s_batch_message[128];
 static ui_text_edit_t s_search_input;
@@ -289,6 +293,11 @@ static void app_files_request_folder(int folder){(void)folder;}
 static const app_desc_t app_device_settings={0};
 static bool test_shelf_style_requested;
 static void app_device_settings_request_shelf_style(void){test_shelf_style_requested=true;}
+static bool shelf_cache_load(app_ctx_t *ctx){(void)ctx;return false;}
+static void shelf_cache_save(void){}
+static const app_desc_t app_device_settings={0};
+static bool test_shelf_style_requested;
+static void app_device_settings_request_shelf_style(void){test_shelf_style_requested=true;}
 #define UI_KEY_1 1
 #define UI_KEY_2 2
 #define UI_KEY_3 3
@@ -301,6 +310,14 @@ static EpdRect s_area;
 static void prepare_covers(app_ctx_t *ctx){(void)ctx;++test_cover_prepares;}
 static void render(app_ctx_t *ctx,uint8_t *fb){(void)ctx;(void)fb;++test_shelf_renders;}
 static bool s_resume_pending,s_reader_cleanup,s_shake_enabled;
+static bool s_rc_double_pending,s_manage_style_restore,s_reader_return_weread,s_open_from_home;
+static void rc_pause_auto(void){}
+static void rc_stop_auto(void){}
+static void rc_cancel_side(void){}
+static int shelf_order_mode(void);
+static bool shelf_order_desc(void);
+static bool shelf_order_apply(app_ctx_t *ctx,int mode,bool desc);
+static bool app_settings_try_shelf_order(unsigned order){(void)order;return true;}
 static bool s_rc_double_pending,s_manage_style_restore;
 static void rc_pause_auto(void){}
 static void rc_stop_auto(void){}
@@ -465,6 +482,8 @@ unit+=r'''
 static int ui_nav_hit(int x,int y){return x>=0&&x<684&&y>=1096&&y<1216?x*4/684:-1;}
 '''
 for name in ("ui_pager_rect_at","ui_pager_hit_at","ui_pager_target"):unit+=function(name,source.parents[2]/"main/ui/ui_kit.c")+"\n"
+unit+='\\n'.join(line for line in (source.parents[2]/'main/ui/ui_nav_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma'))) + '\\n'
+unit += function("ui_nav_tab_rect", source.parents[2]/"main/ui/ui_nav.c") + "\\n"
 unit+='\n'.join(line for line in (source.parents[2]/'main/ui/ui_book_manage_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma'))) + '\n'
 unit+='\n'.join(line for line in (source.parents[2]/'main/ui/ui_reader_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma'))) + '\n'
 unit += function('app_settings_book_paragraph_value', settings_source) + '\n'
@@ -479,7 +498,7 @@ static unsigned s_chapter_lead_row_height;
 static void apply_chapter_lead(const char *title,const char *label,size_t skip,unsigned row){(void)title;(void)label;(void)skip;(void)row;}
 static void refresh_chapter_lead(void){}
 '''
-for name in ("inline_ink_gray", "reader_margin_width", "reader_margin_levels", "reader_margin_level_for", "reader_margin_for_level", "slider_index", "reader_margin_input", "reader_area", "reader_fullscreen_progress_area", "body_rect_for_tracking", "body_rect", "progress_rect", "copy_text", "reader_footer_strip_number", "favorite_key", "favorite_read_handle", "shelf_hidden_key", "shelf_hidden_read_handle", "shelf_hidden_load", "shelf_hidden_save", "shelf_display_style", "shelf_rows", "row_rect", "shelf_category_add", "shelf_category_init", "shelf_category_matches", "shelf_category_remember", "shelf_category_restore", "shelf_categories_recount", "shelf_matches", "compare_books", "sort_shelf", "shelf_order_apply", "shelf_reserve", "delete_retry_find", "delete_retry_reserve", "delete_retry_discard", "scan_shelf_dir", "shelf_backfill_visit", "shelf_backfill_read_books", "scan_shelf", "refresh_cached_progress",
+for name in ("inline_ink_gray", "reader_margin_width", "reader_margin_levels", "reader_margin_level_for", "reader_margin_for_level", "slider_index", "reader_margin_input", "reader_area", "reader_fullscreen_progress_area", "body_rect_for_tracking", "body_rect", "progress_rect", "copy_text", "reader_footer_strip_number", "favorite_key", "favorite_read_handle", "shelf_hidden_key", "shelf_hidden_read_handle", "shelf_hidden_load", "shelf_hidden_save", "shelf_display_style", "shelf_style_slots", "shelf_rows", "shelf_slot_rect", "row_rect", "shelf_category_add", "shelf_category_init", "shelf_category_matches", "shelf_category_remember", "shelf_category_restore", "shelf_categories_recount", "shelf_matches", "compare_books", "sort_shelf", "shelf_order_apply", "shelf_reserve", "delete_retry_find", "delete_retry_reserve", "delete_retry_discard", "scan_shelf_dir", "shelf_backfill_visit", "shelf_backfill_read_books", "scan_shelf", "refresh_cached_progress",
              "pending_find", "pending_reserve", "pending_restore", "pending_discard", "pending_mark_latest", "pending_drop_invalidated", "pending_flush", "reader_page_offset", "save_progress", "retry_progress", "layout_name", "manage_panel", "manage_rect", "batch_rect", "manage_back_rect", "shelf_manage_rect", "shelf_sort_rect", "shelf_pager_group_rect", "shelf_search_rect", "shelf_search_clear_rect", "bulk_filter_rect", "bulk_nav_rect", "bulk_nav_hit", "bulk_sort_rect", "shelf_sort_menu_rect", "shelf_order_mode", "shelf_order_desc", "leaves", "selected_count", "clear_selection", "toggle_selection", "bookmark_compact", "search_begin", "refresh_search_matches", "search_finish", "shelf_search_clear", "refresh_capacity", "manage_apply", "manage_action", "batch_apply", "batch_action", "bulk_turn_page", "bulk_finish", "bulk_select_row", "bulk_action", "bulk_control_at", "menu_handle_enabled", "reader_manual_refresh", "apply_reader_option", "reader_return", "reader_key_action", "import_finish", "shelf_sort_gesture", "on_key", "on_key_long", "draw_wrapped_name", "open_requested_book", "on_enter", "book_on_exit"):
     unit += function(name) + "\n"
 for name in ("book_remote_direction", "shelf_turn_page", "shelf_page_arrow_rect", "reader_swipe_direction"):
@@ -961,7 +980,7 @@ int main(void) {
     EpdRect menu=bulk_filter_rect(1);assert(bulk_action(&ctx,menu.x+10,menu.y+10)==APP_REDRAW_PAGE&&s_sort_menu);
     for(int mode=0;mode<3;++mode)for(int desc=0;desc<2;++desc){
         EpdRect choice=bulk_sort_rect(mode);bulk_action(&ctx,choice.x+5,choice.y+5);
-        choice=bulk_sort_rect(desc?4:3);bulk_action(&ctx,choice.x+5,choice.y+5);
+        choice=bulk_sort_rect(desc?5:4);bulk_action(&ctx,choice.x+5,choice.y+5);
         assert(selected_count()==2&&shelf_order_mode()==mode&&shelf_order_desc()==(bool)desc);
         int found=0;for(int i=0;i<s_count;++i)if(s_shelf[i].selected){assert(!strcmp(s_shelf[i].path,identity0)||!strcmp(s_shelf[i].path,identity1));++found;}assert(found==2);
     }
