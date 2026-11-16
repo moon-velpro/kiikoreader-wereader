@@ -36,6 +36,9 @@ int main(void) {
                             strlen("https://res.weread.qq.com/wrepub/epub_43208843_44?sign=test"),
                             &data, &bytes));
     assert(bytes == sizeof(jpg) && !memcmp(data, jpg, bytes));
+    assert(!wr_tar_find_image(tar, 1025, "epub_43208843_44",
+                             strlen("epub_43208843_44"), &data, &bytes));
+    assert(!data && bytes == 0);
     assert(wr_tar_find_image(tar, sizeof(tar), "../Images/chart.png",
                             strlen("../Images/chart.png"), &data, &bytes));
     assert(bytes == sizeof(png) && !memcmp(data, png, bytes));
