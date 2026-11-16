@@ -113,6 +113,7 @@ static StaticSemaphore_t s_cookie_mutex_storage;
 static SemaphoreHandle_t s_cookie_mutex;
 static StaticSemaphore_t s_report_store_mutex_storage;
 static SemaphoreHandle_t s_report_store_mutex;
+static bool s_report_store_dirty;
 static wr_result_t s_result;
 static wr_job_t s_active_job;
 static atomic_bool s_cancel;
@@ -223,6 +224,28 @@ static bool persist_report_queue_locked(void) {
         nvs_close(nvs);
     }
     return result == ESP_OK;
+}
+
+/* Caller holds s_report_store_mutex. A failed completion write is retried by
+ * the worker before it starts another report, preventing stale NVS state from
+ * silently surviving until the next reboot. */
+static bool report_store_flush_locked(void) {
+    bool dirty;
+    portENTER_CRITICAL(&s_lock);
+    dirty = s_report_store_dirty;
+    portEXIT_CRITICAL(&s_lock);
+    if (!dirty) return true;
+    if (!persist_report_queue_locked()) return false;
+    portENTER_CRITICAL(&s_lock);
+    s_report_store_dirty = false;
+    portEXIT_CRITICAL(&s_lock);
+    return true;
+}
+
+static void report_store_set_dirty(bool dirty) {
+    portENTER_CRITICAL(&s_lock);
+    s_report_store_dirty = dirty;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 static void load_report_queue(void) {
@@ -1838,8 +1861,10 @@ static void process_report(unsigned slot, const wr_report_t *job) {
     }
     unsigned remaining = pending->seconds;
     portEXIT_CRITICAL(&s_lock);
-    if (!persist_report_queue_locked())
-        ESP_LOGW("WEREAD", "persist report queue failed after result=%d", result);
+    bool persisted = persist_report_queue_locked();
+    report_store_set_dirty(!persisted);
+    if (!persisted)
+        ESP_LOGW("WEREAD", "persist report queue failed after result=%d; worker will retry", result);
     (void)xSemaphoreGive(s_report_store_mutex);
     const char *outcome = result == REPORT_CONFIRMED ? "confirmed" :
         result == REPORT_RETRY ? "retry" : result == REPORT_UNKNOWN ? "unknown" : "account_changed";
@@ -1855,9 +1880,10 @@ static void worker_task(void *arg) {
         bool pending = false;
         wr_report_t report;
         portENTER_CRITICAL(&s_lock);
-        bool work = s_work_pending;
+        bool store_dirty = s_report_store_dirty;
+        bool work = !store_dirty && s_work_pending;
         if (work) s_work_pending = false;
-        if (!work) {
+        if (!store_dirty && !work) {
             bool reader_idle = !s_reader_scanning && (!s_reader_scan_end || now - s_reader_scan_end >= 1200000);
             for (unsigned i = 0; i < sizeof(s_reports)/sizeof(s_reports[0]); ++i) {
                 if (!s_reports[i].seconds) continue;
@@ -1871,7 +1897,15 @@ static void worker_task(void *arg) {
         }
         portEXIT_CRITICAL(&s_lock);
 
-        if (work) {
+        if (store_dirty) {
+            bool saved = false;
+            if (s_report_store_mutex &&
+                xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) == pdTRUE) {
+                saved = report_store_flush_locked();
+                (void)xSemaphoreGive(s_report_store_mutex);
+            }
+            if (!saved) vTaskDelay(pdMS_TO_TICKS(500));
+        } else if (work) {
             // 发布完成前，WR_BUSY 保证任务参数不能被覆盖。/ WR_BUSY protects the job until its result is published.
             run_work(&s_work);
             http_keepalive_drop();
@@ -1924,6 +1958,11 @@ static bool report_reading(void) {
     if (!seconds) return true;
     if (!s_reading.owner[0] || !s_worker || !s_report_store_mutex) return false;
     if (xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) != pdTRUE) return false;
+    if (!report_store_flush_locked()) {
+        (void)xSemaphoreGive(s_report_store_mutex);
+        ESP_LOGW("WEREAD", "cannot enqueue reading while report-store NVS retry is pending");
+        return false;
+    }
 
     wr_report_t job = { .library = s_reading.library, .seconds = seconds };
     memcpy(job.book_id, s_reading.book.id, sizeof(job.book_id));
@@ -1991,6 +2030,7 @@ static bool report_reading(void) {
                     portENTER_CRITICAL(&s_lock);
                     s_deferred_reading = previous_deferred;
                     portEXIT_CRITICAL(&s_lock);
+                    report_store_set_dirty(false);
                 }
             }
         }
@@ -2007,12 +2047,14 @@ static bool report_reading(void) {
         *target = previous;
         s_deferred_reading = previous_deferred;
         portEXIT_CRITICAL(&s_lock);
+        report_store_set_dirty(false);
         (void)xSemaphoreGive(s_report_store_mutex);
         ESP_LOGW("WEREAD", "persist pending reading report failed seconds=%u", seconds);
         return false;
     }
 
     s_reading.ms %= 1000;
+    report_store_set_dirty(false);
     (void)xSemaphoreGive(s_report_store_mutex);
     xTaskNotifyGive(s_worker);
     return true;
@@ -2041,6 +2083,10 @@ void wr_reading_stop(bool close) {
         bool persisted = false;
         if (s_report_store_mutex &&
             xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) == pdTRUE) {
+            if (!report_store_flush_locked()) {
+                (void)xSemaphoreGive(s_report_store_mutex);
+                ESP_LOGW("WEREAD", "deferred reading waits for report-store NVS retry");
+            } else {
             wr_reading_store_t previous;
             portENTER_CRITICAL(&s_lock);
             previous = s_deferred_reading;
@@ -2063,7 +2109,9 @@ void wr_reading_stop(bool close) {
                 s_deferred_reading = previous;
                 portEXIT_CRITICAL(&s_lock);
             }
+            report_store_set_dirty(false);
             (void)xSemaphoreGive(s_report_store_mutex);
+            }
         }
         if (!persisted)
             ESP_LOGW("WEREAD", "persist deferred reading failed seconds=%u", s_reading.ms / 1000);
