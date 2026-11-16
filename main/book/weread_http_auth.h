@@ -57,7 +57,9 @@ static inline bool wr_http_body_session_expired_n(const char *body, size_t lengt
         if (value == end || *value++ != '"') return false;
     }
     while (value < end && isspace((unsigned char)*value)) ++value;
-    return value == end || *value == ',' || *value == '}';
+    /* Do not accept a number that merely ends at a transport chunk boundary:
+     * the next chunk may continue it (for example -2012 + 0 => -20120). */
+    return value < end && (*value == ',' || *value == '}');
 }
 
 static inline bool wr_http_body_session_expired(const char *body) {
