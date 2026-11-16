@@ -43,6 +43,10 @@ jobs:
             main/book/weread_body_decode.c tools/weread_body_decode_host_test.c -lz \
             -o "$RUNNER_TEMP/weread-decode-host"
           "$RUNNER_TEMP/weread-decode-host"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_shard_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-shard-host"
+          "$RUNNER_TEMP/weread-shard-host"
           cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/apps \
             tools/weread_progress_host_test.c -o "$RUNNER_TEMP/weread-progress-host"
           "$RUNNER_TEMP/weread-progress-host"
