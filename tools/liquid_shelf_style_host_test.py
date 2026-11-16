@@ -114,7 +114,7 @@ unit += r'''
 int main(void){
  const int expected[]={1,2,6,5};uint8_t fb=0;
  for(unsigned choice=0;choice<4;++choice){
-  style=expected[choice];int rows=style==5?4:9;assert(shelf_rows()==rows);
+  style=expected[choice];int rows=style==5?8:9;assert(shelf_rows()==rows);
   for(int i=0;i<rows;++i){EpdRect hit=row_rect(i),cover=shelf_cover_image(i);
    assert(cover.x>=36&&cover.x+cover.width<=648&&cover.y>=184&&cover.y+cover.height<=972);
    assert(cover.x>=hit.x&&cover.x+cover.width<=hit.x+hit.width&&cover.y>=hit.y&&cover.y+cover.height<=hit.y+hit.height);
