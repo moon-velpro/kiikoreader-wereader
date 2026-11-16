@@ -91,7 +91,17 @@ static int ui_content_width(void){return 612;}
 '''
 unit+='\n'.join(line for line in (root/'main/ui/ui_book_manage_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma')))+'\n'
 unit+='static bool s_bulk_grid;\n'
-for name in ('shelf_rows','row_rect','shelf_cover_image'):
+unit+=r'''
+typedef struct { bool request_return; } app_ctx_t;
+typedef struct { int type,x0,y0,x,y; } ui_gesture_event_t;
+static char s_notice[96];
+static struct { bool tracking; int origin_offset,origin_y; } s_list_drag;
+static app_redraw_t shelf_style_finish(app_ctx_t *ctx){(void)ctx;s_page=SETTINGS_MAIN;return APP_REDRAW_PAGE;}
+static bool settings_drag_gesture(app_ctx_t *ctx,const ui_gesture_event_t *ev,int *offset,int limit,app_redraw_t *redraw){
+    (void)ctx;(void)ev;(void)offset;(void)limit;*redraw=APP_REDRAW_NONE;return false;
+}
+'''
+for name in ('shelf_rows','row_rect','shelf_cover_image','shelf_style_slots','shelf_slot_rect','shelf_slot_cover'):
     unit += function(name,root/'main/apps/app_book.c')+'\n'
 unit += catalog + '\n' + count + '\n' + function('draw_style_thumbnail', source) + '\n'
 unit += 'static void paint(uint8_t *fb){' + render + '}\n'
