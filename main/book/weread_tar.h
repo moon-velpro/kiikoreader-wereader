@@ -12,3 +12,8 @@ bool wr_tar_find_image(const void *archive, size_t bytes,
 /* Return true only when XHTML references an image in the WeRead chapter TAR.
  * Malformed/truncated tags are ignored safely; input must be NUL terminated. */
 bool wr_tar_chapter_has_images(const char *xhtml);
+/* Bounded tag helpers shared by TAR detection and XHTML rewriting. Returned
+ * pointers alias the NUL-terminated input string. */
+const char *wr_tar_tag_end(const char *start);
+const char *wr_tar_image_src(const char *p, const char *end, size_t *length);
+bool wr_tar_image_url(const char *src, size_t length);
