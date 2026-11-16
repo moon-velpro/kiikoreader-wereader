@@ -63,7 +63,7 @@ static void rc_draw_settings(uint8_t*fb){
     }else if(s_rc_tab==1){
         rc_text(fb,(EpdRect){42,746,590,30},21,"翻页效果",false,false);
         const char*const effects[]={"普通","水波纹","速读黑白"};
-        for(int i=0;i<3;++i){EpdRect r=rc_effect_rect(i);bool on=app_settings_reader_turn_effect()==i;
+        for(int i=0;i<3;++i){EpdRect r=rc_effect_rect(i);bool on=app_settings_reader_turn_effect()==(unsigned)i;
             ui_fill_round_rect(fb,r,17,on?UI_GRAY_BLACK:0xf0);ui_draw_control_frame(fb,r,17,on?UI_GRAY_BLACK:0x98);rc_text(fb,r,24,effects[i],true,on);}
         char value[24];unsigned full=app_settings_reader_full_pages();if(full)snprintf(value,sizeof(value),"每 %u 页",full);else snprintf(value,sizeof(value),"不强制");
         rc_link(fb,rc_refresh_rect(),"全刷间隔",value);
