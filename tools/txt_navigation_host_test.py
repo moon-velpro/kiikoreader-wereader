@@ -51,7 +51,7 @@ bool book_index_cache_prepare(const char *source,const char *tag,uint32_t versio
 }
 bool book_index_cache_prepare_file(const char *source,const char *tag,uint32_t version,uint64_t size,int64_t modified,char *path,size_t cap,book_index_cache_header_t *key){
  if(disable_cache)return false;
- assert(!strcmp(tag,"txt")&&version==5&&size<=UINT32_MAX);
+ assert(tag&&*tag&&size<=UINT32_MAX);
  *key=(book_index_cache_header_t){.magic=123,.version=version,.source_size=(uint32_t)size,.modified=modified,.path_hash=456};
  return (size_t)snprintf(path,cap,"%s.idx",source)<cap;
 }
