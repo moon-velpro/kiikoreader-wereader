@@ -36,6 +36,14 @@ class WeReadCacheLogAnalyzerTest(unittest.TestCase):
         self.assertEqual(report["request_time_minus_work_ms"], 0)
         self.assertNotIn("book", str(report["http_by_type"]))
 
+    def test_legacy_http_line_without_reuse_field(self):
+        report = parse_lines([
+            "I WEREAD: HTTP complete url=https://weread.qq.com/web/book/read bytes=1024 elapsed_ms=25"
+        ])
+        self.assertEqual(report["http_requests"], 1)
+        self.assertEqual(report["http_total"]["bytes"], 1024)
+        self.assertEqual(report["http_by_type"]["reader_or_read_api"]["reused"], 0)
+
     def test_new_phase_metrics(self):
         lines = [
             "I WEREAD: cache fetch index=1 bytes=12000 elapsed_ms=900 reader_ms=300 content_ms=500 attempts=1 result=1",
