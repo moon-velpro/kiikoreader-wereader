@@ -20,6 +20,7 @@ Image time is reported separately because it is nested inside the EPUB transform
 ## Implemented on this experimental branch
 
 - **Reader response gzip**: only the streaming Reader fields request advertises gzip. The response decoder detects the 1F 8B header, uses zlib inflate with an allocator directed to PSRAM, and emits at most 2 KiB per callback. Identity responses continue to work unchanged. Truncated gzip, corrupt gzip, and decompression beyond 8 MiB fail cleanly. Full-response image / JSON requests retain identity encoding.
+- **Chapter shard gzip**: requests under `/web/book/chapter/` now advertise gzip, with a bounded PSRAM decompression pass after the complete response. The original identity path is used when the body has no gzip signature. The decoded size is capped by the existing response limit. This reduces wire bytes where the server supports gzip, but requires hardware benchmarking to establish net savings.
 - **Successful-image deduplication**: during one EPUB build, an identical normalized source URL reuses its prior ZIP entry name without another HTTPS download. Exact equality avoids collisions; this is a bounded best-effort cache of at most 48 URLs, and all URL copies are released at book completion/cancellation. It does not solve relative TAR paths or change CDN restrictions.
 - **Cache-only 5% redraw coalescing**: avoids a full redraw for every chapter and reserves the final completion frame for the status transition. Other WeRead job types still redraw on progress changes. This does **not** yet turn on partial DU.
 
