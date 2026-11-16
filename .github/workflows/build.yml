@@ -52,6 +52,11 @@ jobs:
             -o "$RUNNER_TEMP/weread-zip-host"
           "$RUNNER_TEMP/weread-zip-host" "$RUNNER_TEMP/weread-stream.zip"
           python3 tools/weread_zip_stream_validate.py "$RUNNER_TEMP/weread-stream.zip"
+          cc -D_DEFAULT_SOURCE -std=c11 -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -pthread -Itools/weread_prefetch_test_stubs \
+            -Imain/book main/book/weread_prefetch.c tools/weread_prefetch_host_test.c \
+            -o "$RUNNER_TEMP/weread-prefetch-host"
+          "$RUNNER_TEMP/weread-prefetch-host"
           cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/apps \
             tools/weread_progress_host_test.c -o "$RUNNER_TEMP/weread-progress-host"
           "$RUNNER_TEMP/weread-progress-host"
