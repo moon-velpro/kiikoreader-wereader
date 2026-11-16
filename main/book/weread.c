@@ -189,12 +189,9 @@ static void cookie_unlock(void) {
     if (s_cookie_mutex) (void)xSemaphoreGive(s_cookie_mutex);
 }
 
-/* Persist only the durable queue payload. Monotonic retry deadlines are rebuilt
+/* Caller holds s_report_store_mutex. Monotonic retry deadlines are rebuilt
  * after boot, so no stale esp_timer_get_time() values enter NVS. */
-static bool persist_report_queue(void) {
-    if (!s_report_store_mutex ||
-        xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) != pdTRUE) return false;
-
+static bool persist_report_queue_locked(void) {
     wr_report_store_t snapshot = {.magic = WR_REPORT_STORE_MAGIC};
     bool any = false;
     portENTER_CRITICAL(&s_lock);
@@ -225,7 +222,6 @@ static bool persist_report_queue(void) {
         if (result == ESP_OK) result = nvs_commit(nvs);
         nvs_close(nvs);
     }
-    (void)xSemaphoreGive(s_report_store_mutex);
     return result == ESP_OK;
 }
 
@@ -1823,6 +1819,11 @@ static void process_report(unsigned slot, const wr_report_t *job) {
     s_processing_report = false;
     memset(s_cookies, 0, sizeof(s_cookies));
     memset(&s_http_account, 0, sizeof(s_http_account));
+    if (!s_report_store_mutex ||
+        xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE("WEREAD", "report store mutex unavailable after result=%d", result);
+        return;
+    }
     int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     wr_report_t *pending = &s_reports[slot];
@@ -1837,8 +1838,9 @@ static void process_report(unsigned slot, const wr_report_t *job) {
     }
     unsigned remaining = pending->seconds;
     portEXIT_CRITICAL(&s_lock);
-    if (!persist_report_queue())
+    if (!persist_report_queue_locked())
         ESP_LOGW("WEREAD", "persist report queue failed after result=%d", result);
+    (void)xSemaphoreGive(s_report_store_mutex);
     const char *outcome = result == REPORT_CONFIRMED ? "confirmed" :
         result == REPORT_RETRY ? "retry" : result == REPORT_UNKNOWN ? "unknown" : "account_changed";
     ESP_LOGI("WEREAD", "report result=%s stage=%s seconds=%u pending=%u",
@@ -1920,10 +1922,13 @@ void wr_reading_start(const char *path, bool enabled, int64_t now_ms) {
 static bool report_reading(void) {
     const unsigned seconds = s_reading.ms / 1000;
     if (!seconds) return true;
-    if (!s_reading.owner[0] || !s_worker) return false;
+    if (!s_reading.owner[0] || !s_worker || !s_report_store_mutex) return false;
+    if (xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) != pdTRUE) return false;
+
     wr_report_t job = { .library = s_reading.library, .seconds = seconds };
     memcpy(job.book_id, s_reading.book.id, sizeof(job.book_id));
     memcpy(job.owner, s_reading.owner, sizeof(job.owner));
+
     portENTER_CRITICAL(&s_lock);
     wr_report_t *empty = NULL, *entry = NULL;
     for (unsigned i = 0; i < WR_REPORT_COUNT; ++i) {
@@ -1934,28 +1939,72 @@ static bool report_reading(void) {
             break;
         }
     }
+
     bool accepted = false;
+    wr_report_t previous = {0};
+    wr_report_t *target = NULL;
     if (entry && seconds <= UINT32_MAX - entry->seconds) {
+        target = entry;
+        previous = *entry;
         entry->seconds += seconds;
         accepted = true;
     } else if (empty) {
+        target = empty;
+        previous = *empty;
         *empty = job;
         accepted = true;
     }
+
+    wr_reading_store_t previous_deferred = s_deferred_reading;
+    bool clear_deferred = !s_reading.attached &&
+        s_deferred_reading.milliseconds &&
+        s_deferred_reading.library == job.library &&
+        !strcmp(s_deferred_reading.owner, job.owner) &&
+        !strcmp(s_deferred_reading.book_id, job.book_id);
+    if (accepted && clear_deferred) memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
     portEXIT_CRITICAL(&s_lock);
-    if (!accepted) return false;
-    s_reading.ms %= 1000;
-    if (!s_reading.attached) {
-        portENTER_CRITICAL(&s_lock);
-        if (s_deferred_reading.milliseconds &&
-            s_deferred_reading.library == job.library &&
-            !strcmp(s_deferred_reading.owner, job.owner) &&
-            !strcmp(s_deferred_reading.book_id, job.book_id))
-            memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
-        portEXIT_CRITICAL(&s_lock);
+
+    if (!accepted) {
+        /* A closed reading can outlive a full queue. Keep one durable overflow
+         * record and leave the RAM timer untouched until a queue slot is free. */
+        bool deferred_saved = true;
+        if (!s_reading.attached) {
+            wr_reading_store_t deferred = {0};
+            memcpy(deferred.book_id, s_reading.book.id, sizeof(deferred.book_id));
+            memcpy(deferred.owner, s_reading.owner, sizeof(deferred.owner));
+            deferred.library = s_reading.library;
+            deferred.milliseconds = s_reading.ms;
+            portENTER_CRITICAL(&s_lock);
+            previous_deferred = s_deferred_reading;
+            s_deferred_reading = deferred;
+            portEXIT_CRITICAL(&s_lock);
+            deferred_saved = persist_report_queue_locked();
+            if (!deferred_saved) {
+                portENTER_CRITICAL(&s_lock);
+                s_deferred_reading = previous_deferred;
+                portEXIT_CRITICAL(&s_lock);
+            }
+        }
+        (void)xSemaphoreGive(s_report_store_mutex);
+        if (!deferred_saved)
+            ESP_LOGW("WEREAD", "persist deferred reading retry failed seconds=%u", seconds);
+        return false;
     }
-    if (!persist_report_queue())
+
+    if (!persist_report_queue_locked()) {
+        /* Queue changes are transactional with NVS: do not consume the reading
+         * timer unless the new durable queue snapshot was committed. */
+        portENTER_CRITICAL(&s_lock);
+        *target = previous;
+        s_deferred_reading = previous_deferred;
+        portEXIT_CRITICAL(&s_lock);
+        (void)xSemaphoreGive(s_report_store_mutex);
         ESP_LOGW("WEREAD", "persist pending reading report failed seconds=%u", seconds);
+        return false;
+    }
+
+    s_reading.ms %= 1000;
+    (void)xSemaphoreGive(s_report_store_mutex);
     xTaskNotifyGive(s_worker);
     return true;
 }
@@ -1980,14 +2029,27 @@ void wr_reading_stop(bool close) {
     bool queued = true;
     if (s_reading.attached || s_reading.ms >= 1000) queued = report_reading();
     if (close && s_reading.ms >= 1000 && !queued) {
-        portENTER_CRITICAL(&s_lock);
-        memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
-        memcpy(s_deferred_reading.book_id, s_reading.book.id, sizeof(s_deferred_reading.book_id));
-        memcpy(s_deferred_reading.owner, s_reading.owner, sizeof(s_deferred_reading.owner));
-        s_deferred_reading.library = s_reading.library;
-        s_deferred_reading.milliseconds = s_reading.ms;
-        portEXIT_CRITICAL(&s_lock);
-        if (!persist_report_queue())
+        bool persisted = false;
+        if (s_report_store_mutex &&
+            xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) == pdTRUE) {
+            wr_reading_store_t previous;
+            portENTER_CRITICAL(&s_lock);
+            previous = s_deferred_reading;
+            memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
+            memcpy(s_deferred_reading.book_id, s_reading.book.id, sizeof(s_deferred_reading.book_id));
+            memcpy(s_deferred_reading.owner, s_reading.owner, sizeof(s_deferred_reading.owner));
+            s_deferred_reading.library = s_reading.library;
+            s_deferred_reading.milliseconds = s_reading.ms;
+            portEXIT_CRITICAL(&s_lock);
+            persisted = persist_report_queue_locked();
+            if (!persisted) {
+                portENTER_CRITICAL(&s_lock);
+                s_deferred_reading = previous;
+                portEXIT_CRITICAL(&s_lock);
+            }
+            (void)xSemaphoreGive(s_report_store_mutex);
+        }
+        if (!persisted)
             ESP_LOGW("WEREAD", "persist deferred reading failed seconds=%u", s_reading.ms / 1000);
         ESP_LOGW("WEREAD", "report queue full; retaining pending reading seconds=%u",
                  s_reading.ms / 1000);
