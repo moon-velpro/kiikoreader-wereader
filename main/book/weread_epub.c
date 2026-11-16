@@ -234,8 +234,16 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
             ++s_tar_image_hits;
         }
     }
+    size_t image_limit = 4u * 1024u * 1024u;
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (free_psram <= 256u * 1024u) {
+        name[0] = 0;
+        return !wr_cancelled();
+    }
+    if (image_limit > free_psram - 256u * 1024u)
+        image_limit = free_psram - 256u * 1024u;
     for (unsigned attempt = 0; attempt < 3 && !data && !wr_cancelled(); ++attempt) {
-        data = wr_http(url, NULL, NULL, 4*1024*1024, &length);
+        data = wr_http(url, NULL, NULL, image_limit, &length);
         if (!data && !strcmp(wr_error_message(), "微信读书图片地址不受支持")) break;
         if (!data && attempt < 2) vTaskDelay(pdMS_TO_TICKS(350u * (attempt + 1)));
     }
