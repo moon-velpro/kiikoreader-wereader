@@ -34,7 +34,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -o /tmp/weread-progress && /tmp/weread-progress
 ```
 
-The S31 and Pico firmware builds passed at commit `5339242`, including the combined chapter-body+TAR prefetch refactor, 16 KiB PSRAM worker stack, and dynamic PSRAM budgets. The current head subsequently extracted the XHTML TAR-image probe into the host-testable TAR module, fixed SVG `xlink:href` matching, and added malformed-tag sanitizer cases. A fresh S31/Pico firmware build for these latest source changes is still pending. No physical-device speed benchmark has been run for this branch.
+The S31 and Pico firmware builds passed at commit `5339242`, including the combined chapter-body+TAR prefetch refactor, 16 KiB PSRAM worker stack, and dynamic PSRAM budgets. The current head also extracts the XHTML TAR-image probe into the host-testable TAR module, supports SVG `xlink:href`, adds malformed-tag sanitizer cases, and uses a partial-DU progress-area refresh. The fresh S31/Pico build for this latest head is tracked by CI. No physical-device speed benchmark has been run for this branch.
 
 ## Aggressive pipeline additions
 
@@ -42,14 +42,14 @@ The S31 and Pico firmware builds passed at commit `5339242`, including the combi
 - **Bounded body+TAR prefetch:** a 16 KiB PSRAM-stack task fetches chapter i+1 and, only when its XHTML references WeRead-hosted images, fetches that chapter's TAR bundle too. It does both while the original worker rewrites chapter i. The request path is guarded with one mutex so only **one TLS operation** is active at a time. One ready bundle slot, 4 MiB free-PSRAM admission, half-free-PSRAM response budgets, automatic serial fallback, and an ownership-aware release callback bound memory and cleanup. This targets network/CPU/SD overlap; it is not multi-TLS transfer.
 - **Deferred cookie persistence:** cache HTTP response cookies stay updated in RAM; NVS persistence is deferred until the internal-stack cache work task finishes, so the PSRAM-stack worker never writes NVS directly.
 - **Single-pass stored ZIP entries:** chapter XHTML, OPF, and nav staging files are appended to EPUB as stored ZIP members through a bounded 8 KiB scratch buffer with a signed data descriptor. The file is read once for CRC+write; no full-file PSRAM copy is needed. EPUB mimetype remains the original first stored entry.
-- **TAR image bundling:** only chapters whose XHTML contains a `res.weread.qq.com/wrepub/` image URL request the chapter TAR. The request uses the chapter Reader Referer; the `/wrepub/` bundle request does not attach the WeRead session Cookie header. Redirect destinations are validated against the existing HTTPS host allowlist. The POSIX TAR parser validates header checksums, bounds, duplicate basenames and truncated tails. Unsupported/missing entries fall back to the existing individual-image GET. The XHTML probe recognizes both `img src` and SVG `image xlink:href`, and is host-tested against truncated tags.
+- **TAR image bundling:** only chapters whose XHTML contains a `res.weread.qq.com/wrepub/` image URL request the chapter TAR from the `/wrco/` endpoint. The request sends the current WeRead session Cookie and chapter Reader Referer; the Cookie header is removed before following a signed CDN/COS redirect. Redirect destinations are validated against the existing HTTPS host allowlist. The POSIX TAR parser validates header checksums, bounds, duplicate basenames and truncated tails. Unsupported/missing entries fall back to the existing individual-image GET. The XHTML probe recognizes both `img src` and SVG `image xlink:href`, and is host-tested against truncated tags.
 - **Independent test job:** `weread-cache-host-tests` is isolated from unrelated existing repository host/board test failures. ZIP entries are cross-checked with Python `zipfile`; TAR lookup/checksum and nested prefetch-result cleanup are tested with ASan/UBSan and a pthread host shim.
 
 ### Known verification constraints
 
 - Existing unrelated `display-host-tests` fails before new tests because the repository license manifest does not list `licenses/LICENSE-CrossMux.txt`.
 - Existing `board-reader-tests` fails at `txt_navigation_host_test.py` due to unresolved `book_index_cache_prepare_file` and `book_epub_cached_chapter_count` host symbols.
-- S31 and Pico firmware builds passed at `5339242`. The latest XHTML-probe extraction/SVG fix has passed the local GCC ASan/UBSan TAR host suite; fresh board builds for the latest head, physical-device validation and same-book timing comparison remain outstanding.
+- S31 and Pico firmware builds passed at `5339242`. The latest XHTML-probe extraction/SVG and partial-DU progress changes have passed the independent host suite; the fresh board build for the latest head is in CI. Physical-device validation and same-book timing comparison remain outstanding.
 - Existing unrelated host/board test failures do not establish a WeRead regression, but a passing WeRead host job alone does not establish firmware compatibility.
 - The earlier 81.5-second result remains an external measurement. This branch has not reproduced it; no new wall-clock claim should be made without same-book device runs.
 
@@ -89,7 +89,7 @@ ESP-IDF lwIP guidance recommends changing one parameter at a time, considering T
 2. Separate fetch time, image request time, EPUB transformation time, SD write/flush time, and panel blocking time.
 3. Validate the combined body+TAR prefetch against the serial path on the same book and AP; retain one active TLS request and a single ready bundle slot.
 4. Only if TCP receive stalls dominate: test one lwIP/Wi-Fi parameter at a time, recording internal free heap and largest contiguous DMA block before Wi-Fi init and during download.
-5. Only if panel blocking appears on the critical path: evaluate partial DU refresh with completion-frame arbitration and UNDERRUN monitoring.
+5. Measure the new partial-DU progress-area refresh on the S31: compare cache wall time, refresh latency, ghosting and UNDERRUN counters; retain a full completion-frame refresh.
 6. Keep a byte-identical output/EPUB validation test alongside speed measurements.
 
 ## Device benchmark log analysis
