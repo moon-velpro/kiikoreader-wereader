@@ -1749,6 +1749,7 @@ static bool same_report_book(const wr_report_t *a, const wr_report_t *b) {
 static report_result_t run_report(const wr_report_t *job, const char **stage) {
     *stage = "account";
     if (!account_is(job->owner, job->library)) return REPORT_ACCOUNT_CHANGED;
+    s_expired = false;
     *stage = "wifi";
     if (!wr_online()) return REPORT_RETRY;
     wr_chapter_t chapter;
