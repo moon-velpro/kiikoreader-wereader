@@ -34,7 +34,7 @@
 #include "settings.h"
 
 #define WR_MAX_SHELF 8192
-#define WR_REPORT_COUNT 16
+#define WR_REPORT_COUNT 17 /* 16 normal slots plus one overflow reserve. */
 #define WR_REPORT_STORE_MAGIC UINT32_C(0x57525231)
 #define WR_INDEX WR_DIR "/shelf.bin"
 #define WR_INDEX_TEMP WR_DIR "/shelf.part"
