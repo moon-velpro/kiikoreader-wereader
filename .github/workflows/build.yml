@@ -7,6 +7,38 @@ on:
   workflow_dispatch:
 
 jobs:
+  weread-cache-host-tests:
+    runs-on: ubuntu-latest
+    env:
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: WeRead fast-path sanitizer regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_body_decode_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-decode"
+          "$RUNNER_TEMP/weread-decode"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_shard_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-shard"
+          "$RUNNER_TEMP/weread-shard"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_zip_stream.c tools/weread_zip_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-zip"
+          "$RUNNER_TEMP/weread-zip" "$RUNNER_TEMP/weread-test.zip"
+          python3 tools/weread_zip_stream_validate.py "$RUNNER_TEMP/weread-test.zip"
+          cc -D_DEFAULT_SOURCE -std=c11 -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined -Itools/weread_prefetch_test_stubs -Imain/book \
+            main/book/weread_prefetch.c tools/weread_prefetch_host_test.c \
+            -o "$RUNNER_TEMP/weread-prefetch"
+          "$RUNNER_TEMP/weread-prefetch"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/apps \
+            tools/weread_progress_host_test.c -o "$RUNNER_TEMP/weread-progress"
+          "$RUNNER_TEMP/weread-progress"
+
   display-host-tests:
     env:
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
