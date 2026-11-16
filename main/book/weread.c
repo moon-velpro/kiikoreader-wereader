@@ -1764,7 +1764,11 @@ static bool same_report_book(const wr_report_t *a, const wr_report_t *b) {
 
 static report_result_t run_report(const wr_report_t *job, const char **stage) {
     *stage = "account";
-    if (!account_is(job->owner, job->library)) return REPORT_ACCOUNT_CHANGED;
+    memset(&s_http_account, 0, sizeof(s_http_account));
+    if (!account_is(job->owner, job->library) ||
+        !read_account(&s_http_account) ||
+        strcmp(s_http_account.owner, job->owner) ||
+        s_http_account.library != job->library) return REPORT_ACCOUNT_CHANGED;
     s_expired = false;
     *stage = "wifi";
     if (!wr_online()) return REPORT_RETRY;
@@ -1812,6 +1816,7 @@ static void process_report(unsigned slot, const wr_report_t *job) {
     report_result_t result = run_report(job, &stage);
     s_processing_report = false;
     memset(s_cookies, 0, sizeof(s_cookies));
+    memset(&s_http_account, 0, sizeof(s_http_account));
     int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     wr_report_t *pending = &s_reports[slot];
