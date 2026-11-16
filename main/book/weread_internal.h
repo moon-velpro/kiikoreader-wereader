@@ -20,6 +20,7 @@ char *wr_http_report(const char *body, const char *referer, bool *post_started);
 cJSON *wr_json(const char *url, const char *body);
 void wr_work_progress(unsigned done, unsigned total);
 bool wr_reader(const char *book, const char *chapter, wr_reader_t *reader);
+bool wr_reader_referer(const char *book, const char *chapter, char out[384]);
 bool wr_reader_fields_cached(const char *book, const char *chapter, wr_reader_t *reader);
 char *wr_chapter_content(const char *book, const char *chapter, const wr_reader_t *reader, bool *plain, size_t *length);
 bool wr_remote_position(const char *id, wr_chapter_t *chapter, unsigned *offset, unsigned *pct);
