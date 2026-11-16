@@ -51,6 +51,7 @@ typedef struct {
 
 static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain);
 static void cache_prefetch_release(void *result);
+static bool weread_tar_image_url(const char *src, size_t length);
 
 static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chapter,
                                  bool *plain, size_t *size, unsigned index) {
