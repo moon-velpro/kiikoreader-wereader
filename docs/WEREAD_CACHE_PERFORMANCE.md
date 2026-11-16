@@ -4,7 +4,7 @@
 
 This branch is based on the repository's current `main`, not on the separately reported 81.5 s working-tree snapshot. The original `main` baseline did not contain the reported chapter-TAR path or chapter prefetch. This branch now independently implements TAR image bundles and a bounded prefetch pipeline, but it is not the same source snapshot and has not reproduced the 81.5 s device measurement.
 
-The experimental pipeline combines Reader/shard gzip, cache-only shard Keep-Alive with a circuit breaker, one-worker chapter+TAR prefetch, single-pass ZIP writing, image deduplication and progress redraw coalescing. It does not add concurrently active TLS sockets, change radio buffers or change panel waveforms.
+The experimental pipeline combines Reader/shard gzip, cache-only shard Keep-Alive with a circuit breaker, one-worker chapter+TAR prefetch, single-pass ZIP writing, image deduplication and partial-DU progress updates. It does not add concurrently active TLS sockets, change radio buffers or change panel waveforms.
 
 ## Timing added
 
@@ -22,7 +22,7 @@ Image time is reported separately because it is nested inside the EPUB transform
 - **Reader response gzip**: only the streaming Reader fields request advertises gzip. The response decoder detects the 1F 8B header, uses zlib inflate with an allocator directed to PSRAM, and emits at most 2 KiB per callback. Identity responses continue to work unchanged. Truncated gzip, corrupt gzip, and decompression beyond 8 MiB fail cleanly. Full-response image / JSON requests retain identity encoding.
 - **Chapter shard gzip**: requests under `/web/book/chapter/` now advertise gzip, with a bounded PSRAM decompression pass after the complete response. The original identity path is used when the body has no gzip signature. The decoded size is capped by the existing response limit. This reduces wire bytes where the server supports gzip, but requires hardware benchmarking to establish net savings.
 - **Successful-image deduplication**: during one EPUB build, an identical normalized source URL reuses its prior ZIP entry name without another HTTPS download. Exact equality avoids collisions; this is a bounded best-effort cache of at most 48 URLs, and all URL copies are released at book completion/cancellation. Chapter TAR assets are now matched by source basename first; individual CDN GET remains the fallback for missing or unsupported members.
-- **Cache-only 5% redraw coalescing**: avoids a full redraw for every chapter and reserves the final completion frame for the status transition. Other WeRead job types still redraw on progress changes. This does **not** yet turn on partial DU.
+- **Cache-only 5% redraw coalescing + partial DU**: avoids a full redraw for every chapter and reserves the final completion frame for the status transition. When progress crosses the threshold, only the fixed progress-bar/text rectangle is repainted and sent with `APP_REDRAW_AREA` using the existing `MODE_DU` dynamic waveform. Other WeRead job types keep their previous progress behavior.
 
 Host tests run with sanitizers:
 ```sh
@@ -34,7 +34,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -o /tmp/weread-progress && /tmp/weread-progress
 ```
 
-The S31 and Pico firmware builds passed at commit `5339242`, including the combined chapter-body+TAR prefetch refactor, 16 KiB PSRAM worker stack, and dynamic PSRAM budgets. Later commits only changed benchmark-log tooling/documentation. No physical-device speed benchmark has been run for this branch.
+The S31 and Pico firmware builds passed at commit `5339242`, including the combined chapter-body+TAR prefetch refactor, 16 KiB PSRAM worker stack, and dynamic PSRAM budgets. The newer progress-area DU change is undergoing a fresh board build. No physical-device speed benchmark has been run for this branch.
 
 ## Aggressive pipeline additions
 
@@ -49,7 +49,7 @@ The S31 and Pico firmware builds passed at commit `5339242`, including the combi
 
 - Existing unrelated `display-host-tests` fails before new tests because the repository license manifest does not list `licenses/LICENSE-CrossMux.txt`.
 - Existing `board-reader-tests` fails at `txt_navigation_host_test.py` due to unresolved `book_index_cache_prepare_file` and `book_epub_cached_chapter_count` host symbols.
-- S31 and Pico firmware builds passed at `5339242`, which includes the combined body+TAR prefetch implementation. Physical-device validation and same-book timing comparison remain outstanding.
+- S31 and Pico firmware builds passed at `5339242`, which includes the combined body+TAR prefetch implementation. The subsequent progress-area DU change is pending its fresh build. Physical-device validation and same-book timing comparison remain outstanding.
 - Existing unrelated host/board test failures do not establish a WeRead regression, but a passing WeRead host job alone does not establish firmware compatibility.
 - The earlier 81.5-second result remains an external measurement. This branch has not reproduced it; no new wall-clock claim should be made without same-book device runs.
 
