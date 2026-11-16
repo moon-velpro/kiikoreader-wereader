@@ -1633,6 +1633,9 @@ static bool login(void) {
 
 bool wr_logout(bool remove_books) {
     if (wr_status(NULL, 0, NULL, NULL) == WR_BUSY) return false;
+    /* Close the current reading session against its original account before
+     * clearing credentials; any queued time is never reassigned to a new user. */
+    wr_reading_stop(true);
     wr_account_t account;
     if (!read_account(&account)) return true;
     if (remove_books) {
