@@ -482,8 +482,8 @@ unit+=r'''
 static int ui_nav_hit(int x,int y){return x>=0&&x<684&&y>=1096&&y<1216?x*4/684:-1;}
 '''
 for name in ("ui_pager_rect_at","ui_pager_hit_at","ui_pager_target"):unit+=function(name,source.parents[2]/"main/ui/ui_kit.c")+"\n"
-unit+='\\n'.join(line for line in (source.parents[2]/'main/ui/ui_nav_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma'))) + '\\n'
-unit += function("ui_nav_tab_rect", source.parents[2]/"main/ui/ui_nav.c") + "\\n"
+unit+='\n'.join(line for line in (source.parents[2]/'main/ui/ui_nav_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma'))) + '\n'
+unit += function("ui_nav_tab_rect", source.parents[2]/"main/ui/ui_nav.c") + "\n"
 unit+='\n'.join(line for line in (source.parents[2]/'main/ui/ui_book_manage_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma'))) + '\n'
 unit+='\n'.join(line for line in (source.parents[2]/'main/ui/ui_reader_layout.h').read_text().splitlines() if not line.startswith(('#include','#pragma'))) + '\n'
 unit += function('app_settings_book_paragraph_value', settings_source) + '\n'
