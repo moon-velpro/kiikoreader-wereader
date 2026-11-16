@@ -276,73 +276,10 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     return ok;
 }
 
-static const char *tag_end(const char *start) {
-    char quote = 0;
-    for (const char *p = start; *p; ++p) {
-        if (quote) { if (*p == quote) quote = 0; }
-        else if (*p == '\'' || *p == '"') quote = *p;
-        else if (*p == '>') return p;
-    }
-    return NULL;
-}
-
-static const char *image_src(const char *p, const char *end, size_t *length) {
-    while (p < end) {
-        while (p < end && isspace((unsigned char)*p)) ++p;
-        const char *key = p;
-        while (p < end && !strchr("= \r\n\t", *p)) ++p;
-        size_t key_size = p-key;
-        while (p < end && isspace((unsigned char)*p)) ++p;
-        if (p == end || *p != '=') continue;
-        do { ++p; } while (p < end && isspace((unsigned char)*p));
-        if (p == end) break;
-        char quote = (*p == '"' || *p == '\'') ? *p++ : 0;
-        const char *value = p;
-        while (p < end && (quote ? *p != quote : !isspace((unsigned char)*p))) ++p;
-        if ((key_size == 3 && !strncasecmp(key,"src",3)) || (key_size == 9 && !strncasecmp(key,"xlink:href",9))) {
-            *length = p-value;
-            return value;
-        }
-        if (quote && p < end) ++p;
-    }
-    return NULL;
-}
-
-static bool weread_tar_image_url(const char *src, size_t length) {
-    static const char *const prefixes[] = {
-        "https://res.weread.qq.com/wrepub/",
-        "http://res.weread.qq.com/wrepub/",
-        "//res.weread.qq.com/wrepub/"
-    };
-    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
-        size_t n = strlen(prefixes[i]);
-        if (length >= n && !strncasecmp(src, prefixes[i], n)) return true;
-    }
-    return false;
-}
-
-static bool chapter_has_tar_images(const char *data) {
-    for (const char *p = data; p && *p;) {
-        if (*p != '<') { ++p; continue; }
-        bool image = !strncasecmp(p, "<img", 4) &&
-                     (isspace((unsigned char)p[4]) || p[4] == '>');
-        bool svg_image = !strncasecmp(p, "<image", 6) &&
-                         isspace((unsigned char)p[6]);
-        if (!image && !svg_image) { ++p; continue; }
-        const char *end = tag_end(p);
-        if (!end) return false;
-        size_t length = 0;
-        const char *src = image_src(p + (image ? 4 : 6), end, &length);
-        if (src && weread_tar_image_url(src, length)) return true;
-        p = end + 1;
-    }
-    return false;
-}
-
 static char *cache_fetch_tar(const wr_book_t *book, const wr_chapter_t *chapter,
                              const char *content, bool plain, size_t *tar_bytes) {
     if (tar_bytes) *tar_bytes = 0;
-    if (!chapter->tar[0] || plain || !chapter_has_tar_images(content) || wr_cancelled())
+    if (!chapter->tar[0] || plain || !wr_tar_chapter_has_images(content) || wr_cancelled())
         return NULL;
     char tar_url[384], reader_referer[384];
     const char *src = chapter->tar;
