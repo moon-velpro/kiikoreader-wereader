@@ -24,7 +24,7 @@ static int inflate_bytes(wr_body_decoder_t *d, const unsigned char *bytes, size_
     if (length > UINT_MAX) return -1;
     d->z.next_in = (Bytef *)bytes;
     d->z.avail_in = (uInt)length;
-    while (d->z.avail_in && !d->gzip_complete) {
+    while (!d->gzip_complete) {
         uInt before = d->z.avail_in;
         d->z.next_out = d->output;
         d->z.avail_out = sizeof(d->output);
@@ -37,7 +37,7 @@ static int inflate_bytes(wr_body_decoder_t *d, const unsigned char *bytes, size_
             return 0;
         }
         if (zret != Z_OK && zret != Z_BUF_ERROR) return -1;
-        if (d->z.avail_in == before && !output_size) return -1;
+        if (d->z.avail_in == before && !output_size) return before ? -1 : 0;
         if (!d->z.avail_in && d->z.avail_out) break;
     }
     return 0;
