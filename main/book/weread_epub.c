@@ -155,6 +155,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
         if (!data && attempt < 2) vTaskDelay(pdMS_TO_TICKS(350u * (attempt + 1)));
     }
     if (!data) {
+        s_cache_image_elapsed_us += (uint64_t)(esp_timer_get_time() - image_started);
         ESP_LOGW("WEREAD", "cache image id=%u elapsed_ms=%lld result=0 error=%s", id,
                  (long long)((esp_timer_get_time() - image_started) / 1000), wr_error_message());
         /* CrossMux treats embedded illustrations as best-effort: a transient
@@ -167,6 +168,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     bool ok = !ext || (zip_entry(zip, name, data, length) &&
         fprintf(opf, "<item id=\"i%u\" href=\"%s\" media-type=\"%s\"%s/>", id, name, mime,
                 id == 0 ? " properties=\"cover-image\"" : "") >= 0);
+    s_cache_image_elapsed_us += (uint64_t)(esp_timer_get_time() - image_started);
     ESP_LOGI("WEREAD", "cache image id=%u bytes=%u elapsed_ms=%lld result=%d", id,
              (unsigned)length, (long long)((esp_timer_get_time() - image_started) / 1000), ok);
     if (!ext) name[0] = 0;
