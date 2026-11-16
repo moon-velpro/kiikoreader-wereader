@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main, codex/metalio-s31-test30]
+    branches: [main, codex/metalio-s31-test30, codex/weread-cache-pipeline-20261116]
   pull_request:
   workflow_dispatch:
 
