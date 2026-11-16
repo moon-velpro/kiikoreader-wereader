@@ -692,6 +692,55 @@ static void wr_reader_zfree(voidpf opaque, voidpf ptr) {
     free(ptr);
 }
 
+typedef struct {
+    char *data;
+    size_t used, capacity, limit;
+    bool failed;
+} wr_expand_sink_t;
+
+static bool wr_expand_write(const char *bytes, size_t n, void *arg) {
+    wr_expand_sink_t *sink = arg;
+    if (n > sink->limit - sink->used) {
+        sink->failed = true;
+        return true;
+    }
+    size_t needed = sink->used + n + 1;
+    if (needed > sink->capacity) {
+        size_t next = sink->capacity ? sink->capacity : 1024;
+        while (next < needed && next < sink->limit + 1) {
+            next = next > (sink->limit + 1) / 2 ? sink->limit + 1 : next * 2;
+        }
+        if (next < needed) { sink->failed = true; return true; }
+        char *grown = heap_caps_realloc(sink->data, next, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!grown) { sink->failed = true; return true; }
+        sink->data = grown;
+        sink->capacity = next;
+    }
+    memcpy(sink->data + sink->used, bytes, n);
+    sink->used += n;
+    return false;
+}
+
+/* Decode a complete chapter shard. Raw image/API requests still use identity. */
+static char *wr_expand_gzip_body(const char *wire, size_t length, size_t limit, size_t *decoded_length) {
+    wr_body_decoder_t *decoder = heap_caps_malloc(sizeof(*decoder),
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!decoder) return NULL;
+    wr_expand_sink_t sink = {.limit = limit};
+    wr_body_decoder_init(decoder, wr_expand_write, &sink, limit, wr_reader_zalloc, wr_reader_zfree);
+    int status = wr_body_decoder_feed(decoder, wire, length);
+    if (status == 0) status = wr_body_decoder_finish(decoder);
+    wr_body_decoder_close(decoder);
+    free(decoder);
+    if (status || sink.failed || !sink.data) {
+        free(sink.data);
+        return NULL;
+    }
+    sink.data[sink.used] = 0;
+    *decoded_length = sink.used;
+    return sink.data;
+}
+
 static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
                           size_t *length, wr_http_chunk_fn chunk, void *context,
                           bool *fields_received, bool *post_started) {
@@ -704,6 +753,8 @@ static char *http_request(const char *url, const char *body, const char *referer
     if (!request) { s_error_message = "内存不足，无法创建微信读书请求"; return NULL; }
     char *absolute = request->absolute;
     const bool service = url[0] == '/';
+    const bool compressed_shard = !chunk && service &&
+        !strncmp(url, "/web/book/chapter/", sizeof("/web/book/chapter/") - 1);
     request->capture_service_cookies = service;
     bool upgrade = !service && !strncmp(url, "http://", 7);
     const char *prefix = service ? WR_HOST : upgrade ? "https://" : "";
@@ -739,7 +790,7 @@ static char *http_request(const char *url, const char *body, const char *referer
     };
     esp_http_client_handle_t http = esp_http_client_init(&config);
     if (!http) { s_error_message = "无法创建网络请求"; free(request); return NULL; }
-    esp_http_client_set_header(http, "Accept-Encoding", chunk ? "gzip" : "identity");
+    esp_http_client_set_header(http, "Accept-Encoding", (chunk || compressed_shard) ? "gzip" : "identity");
     esp_http_client_set_header(http, "Referer", referer ? referer : WR_HOST "/");
     if (service) {
         esp_http_client_set_header(http,"Accept","application/json, text/plain, */*");
@@ -922,6 +973,21 @@ cleanup:
         free(data); return NULL;
     }
     data[used] = 0;
+    if (compressed_shard && used >= 2 &&
+        (uint8_t)data[0] == 0x1f && (uint8_t)data[1] == 0x8b) {
+        size_t expanded = 0;
+        char *decoded = wr_expand_gzip_body(data, used, limit, &expanded);
+        if (!decoded) {
+            wr_error_set("微信读书章节分片解压失败");
+            free(data);
+            return NULL;
+        }
+        free(data);
+        data = decoded;
+        ESP_LOGI("WEREAD", "shard gzip decoded wire=%u decoded=%u",
+                 (unsigned)used, (unsigned)expanded);
+        used = expanded;
+    }
     ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", url, (unsigned)used,
              (long long)((esp_timer_get_time()-request_started_us)/1000));
     if (length) *length = used;
