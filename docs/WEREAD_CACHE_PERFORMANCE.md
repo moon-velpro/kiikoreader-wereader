@@ -36,7 +36,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -o /tmp/weread-progress && /tmp/weread-progress
 ```
 
-The S31 and Pico firmware builds passed at commit `5339242`, including the combined chapter-body+TAR prefetch refactor, 16 KiB PSRAM worker stack, and dynamic PSRAM budgets. The current head also extracts the XHTML TAR-image probe into the host-testable TAR module, supports SVG `xlink:href`, adds malformed-tag sanitizer cases, and uses a partial-DU progress-area refresh. The fresh S31/Pico build for this latest head is tracked by CI. No physical-device speed benchmark has been run for this branch.
+The S31 and Pico firmware builds passed again at commit `ec6e387`, including the extracted XHTML/TAR helpers, SVG `xlink:href`, malformed-tag sanitizer cases, and partial-DU progress-area refresh. The independent WeRead host suite also passed on that run. No physical-device speed benchmark has been run for this branch.
 
 ## Aggressive pipeline additions
 
@@ -51,7 +51,7 @@ The S31 and Pico firmware builds passed at commit `5339242`, including the combi
 
 - Existing unrelated `display-host-tests` fails before new tests because the repository license manifest does not list `licenses/LICENSE-CrossMux.txt`.
 - Existing `board-reader-tests` fails at `txt_navigation_host_test.py` due to unresolved `book_index_cache_prepare_file` and `book_epub_cached_chapter_count` host symbols.
-- S31 and Pico firmware builds passed at `5339242`. The latest XHTML-probe extraction/SVG and partial-DU progress changes have passed the independent host suite; the fresh board build for the latest head is in CI. Physical-device validation and same-book timing comparison remain outstanding.
+- S31 and Pico firmware builds passed at `ec6e387`, which includes the latest XHTML-probe extraction/SVG and partial-DU progress changes. Physical-device validation and same-book timing comparison remain outstanding.
 - Existing unrelated host/board test failures do not establish a WeRead regression, but a passing WeRead host job alone does not establish firmware compatibility.
 - The earlier 81.5-second result remains an external measurement. This branch has not reproduced it; no new wall-clock claim should be made without same-book device runs.
 
