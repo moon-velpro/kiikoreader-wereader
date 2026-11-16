@@ -73,7 +73,7 @@ static inline bool wr_http_auth_scan_chunk(wr_http_auth_scan_t *scan,
 
     char prefix[128];
     size_t tail = scan->tail_length;
-    if (tail > sizeof(prefix)) tail = sizeof(prefix);
+    if (tail > sizeof(scan->tail)) tail = sizeof(scan->tail);
     size_t take = length;
     if (take > sizeof(prefix) - tail) take = sizeof(prefix) - tail;
     memcpy(prefix, scan->tail, tail);
