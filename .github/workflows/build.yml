@@ -2,11 +2,48 @@ name: build
 
 on:
   push:
-    branches: [main, codex/metalio-s31-test30]
+    branches: [main, codex/metalio-s31-test30, codex/weread-cache-optimize-20261116]
   pull_request:
   workflow_dispatch:
 
 jobs:
+  weread-cache-host-tests:
+    runs-on: ubuntu-latest
+    env:
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: WeRead fast-path sanitizer regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_body_decode_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-decode"
+          "$RUNNER_TEMP/weread-decode"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_shard_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-shard"
+          "$RUNNER_TEMP/weread-shard"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_zip_stream.c tools/weread_zip_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-zip"
+          "$RUNNER_TEMP/weread-zip" "$RUNNER_TEMP/weread-test.zip"
+          python3 tools/weread_zip_stream_validate.py "$RUNNER_TEMP/weread-test.zip"
+          cc -D_DEFAULT_SOURCE -std=c11 -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined -Itools/weread_prefetch_test_stubs -Imain/book \
+            main/book/weread_prefetch.c tools/weread_prefetch_host_test.c \
+            -o "$RUNNER_TEMP/weread-prefetch"
+          "$RUNNER_TEMP/weread-prefetch"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_tar.c tools/weread_tar_host_test.c \
+            -o "$RUNNER_TEMP/weread-tar"
+          "$RUNNER_TEMP/weread-tar"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/apps \
+            tools/weread_progress_host_test.c -o "$RUNNER_TEMP/weread-progress"
+          "$RUNNER_TEMP/weread-progress"
+          python3 tools/weread_perf_log_summary_test.py
+
   display-host-tests:
     env:
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -39,6 +76,27 @@ jobs:
           python3 tools/test_s31_dma_chain.py
           python3 tools/test_s31_line_queue.py
           python3 tools/test_s31_radio_margin.py
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_body_decode_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-decode-host"
+          "$RUNNER_TEMP/weread-decode-host"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_shard_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-shard-host"
+          "$RUNNER_TEMP/weread-shard-host"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_zip_stream.c tools/weread_zip_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-zip-host"
+          "$RUNNER_TEMP/weread-zip-host" "$RUNNER_TEMP/weread-stream.zip"
+          python3 tools/weread_zip_stream_validate.py "$RUNNER_TEMP/weread-stream.zip"
+          cc -D_DEFAULT_SOURCE -std=c11 -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -pthread -Itools/weread_prefetch_test_stubs \
+            -Imain/book main/book/weread_prefetch.c tools/weread_prefetch_host_test.c \
+            -o "$RUNNER_TEMP/weread-prefetch-host"
+          "$RUNNER_TEMP/weread-prefetch-host"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/apps \
+            tools/weread_progress_host_test.c -o "$RUNNER_TEMP/weread-progress-host"
+          "$RUNNER_TEMP/weread-progress-host"
           python3 tools/test_home_minute_present.py
           bash tools/run_metalio_cover_cache_host_test.sh
           python3 tools/board_source_view.py --board metalio47 --tests --output build/host/metalio47

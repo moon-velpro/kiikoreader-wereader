@@ -1,9 +1,12 @@
 #include "weread_internal.h"
+#include "weread_body_decode.h"
+#include "weread_body_buffer.h"
 
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +72,10 @@ static bool s_reader_scanning;
 static int64_t s_reader_scan_end;
 static esp_http_client_handle_t s_http_keepalive;
 static char s_http_keepalive_host[128];
+/* Aggressive cache-only POST shard reuse; trip the breaker on the first
+ * unexpected response and fall back to the tested streaming implementation. */
+static bool s_http_shard_fast_disabled;
+static unsigned s_http_shard_fast_hits, s_http_shard_fast_fallbacks;
 static struct {
     wr_report_t account_book;
     char chapter[WR_ID];
@@ -92,6 +99,9 @@ typedef struct {
 } wr_http_context_t;
 static StaticSemaphore_t s_cookie_mutex_storage;
 static SemaphoreHandle_t s_cookie_mutex;
+static StaticSemaphore_t s_http_gate_storage;
+static SemaphoreHandle_t s_http_gate;
+static _Atomic bool s_cache_cookie_dirty;
 static wr_result_t s_result;
 static wr_job_t s_active_job;
 static atomic_bool s_cancel;
@@ -345,7 +355,8 @@ static esp_err_t capture_cookie(esp_http_client_event_t *event) {
         if (used) { memcpy(s_cookies+used,"; ",2); used+=2; }
         memcpy(s_cookies+used,header,len);
         s_cookies[used+len]=0;
-        save_session_cookies();
+        if (s_active_job == WR_CACHE) atomic_store(&s_cache_cookie_dirty, true);
+        else save_session_cookies();
     }
     cookie_unlock();
     return ESP_OK;
@@ -465,7 +476,9 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
     esp_http_client_delete_all_headers(http);
     esp_http_client_reset_redirect_counter(http);
     esp_http_client_set_method(http, body ? HTTP_METHOD_POST : HTTP_METHOD_GET);
-    esp_http_client_set_header(http, "Accept-Encoding", "identity");
+    esp_http_client_set_header(http, "Accept-Encoding",
+                               service && !strncmp(url, "/web/book/chapter/", 18)
+                                   ? "gzip" : "identity");
     esp_http_client_set_header(http, "Referer", referer ? referer : WR_HOST "/");
     if (service) {
         esp_http_client_set_header(http, "Accept", "application/json, text/plain, */*");
@@ -678,18 +691,90 @@ static bool report_display_busy(void) {
     return busy;
 }
 
-static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
+/* Keep the inflate workspace out of the small internal DMA heap. */
+static voidpf wr_reader_zalloc(voidpf opaque, uInt count, uInt bytes) {
+    (void)opaque;
+    if (!count || bytes > SIZE_MAX / count) return Z_NULL;
+    return heap_caps_malloc((size_t)count * bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void wr_reader_zfree(voidpf opaque, voidpf ptr) {
+    (void)opaque;
+    free(ptr);
+}
+
+static void *wr_shard_resize(void *previous, size_t bytes, void *context) {
+    (void)context;
+    return heap_caps_realloc(previous, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static char *http_request_impl(const char *url, const char *body, const char *referer, size_t limit,
                           size_t *length, wr_http_chunk_fn chunk, void *context,
                           bool *fields_received, bool *post_started) {
     const int64_t request_started_us = esp_timer_get_time();
     s_http_open_failed = false;
+    const bool service = url[0] == '/';
+    const bool res_archive = !strncasecmp(url, "https://res.weread.qq.com/wrco/",
+                                             sizeof("https://res.weread.qq.com/wrco/") - 1);
     if (wr_cancelled()) { s_error_message = "操作已取消"; return NULL; }
     if (!wr_online()) { http_keepalive_drop(); s_error_message = "Wi-Fi 未连接或网络尚未就绪"; return NULL; }
-    if (url[0] == '/') restore_session_cookie();
+    if (service) restore_session_cookie(); /* service call restores cookies on the internal-stack worker before TAR prefetch */
     wr_http_context_t *request = heap_caps_calloc(1, sizeof(*request), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!request) { s_error_message = "内存不足，无法创建微信读书请求"; return NULL; }
+    /* Reuse a single host-scoped TLS handle across the small e_/t_ POST shards.
+     * Only the cache job enters this path. A failed request is replayed once via
+     * the pre-existing open/fetch/read path, then fast reuse stays disabled for
+     * the remainder of the cache job. Reader streaming remains unchanged. */
+    bool try_fast = s_active_job == WR_CACHE && !chunk && !post_started &&
+        !s_http_shard_fast_disabled && !strncmp(url, "/web/book/chapter/", 18);
+    if (try_fast) {
+        size_t fast_size = 0;
+        char *fast = http_request_reusable(request, url, body, referer, limit,
+                                            &fast_size, NULL);
+        if (fast) {
+            bool packed = fast_size >= 2 &&
+                          (uint8_t)fast[0] == 0x1f && (uint8_t)fast[1] == 0x8b;
+            if (!packed) {
+                if (length) *length = fast_size;
+                free(request);
+                ++s_http_shard_fast_hits;
+                return fast;
+            }
+            wr_body_buffer_t decoded = {.limit = limit, .resize = wr_shard_resize};
+            wr_body_decoder_t *inflate = heap_caps_malloc(sizeof(*inflate),
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            int result = -1;
+            if (inflate) {
+                wr_body_decoder_init(inflate, wr_body_buffer_write, &decoded, limit,
+                                     wr_reader_zalloc, wr_reader_zfree);
+                result = wr_body_decoder_feed(inflate, fast, fast_size);
+                if (result == 0) result = wr_body_decoder_finish(inflate);
+                wr_body_decoder_close(inflate);
+                free(inflate);
+            }
+            free(fast);
+            if (result == 0 && !decoded.failed && decoded.data) {
+                if (length) *length = decoded.used;
+                free(request);
+                ++s_http_shard_fast_hits;
+                return decoded.data;
+            }
+            free(decoded.data);
+        }
+        free(request->body_data);
+        request->body_data = NULL;
+        s_http_shard_fast_disabled = true;
+        ++s_http_shard_fast_fallbacks;
+        http_keepalive_drop();
+        if (s_expired || wr_cancelled()) {
+            free(request);
+            return NULL;
+        }
+        ESP_LOGW("WEREAD", "cache shard keep-alive disabled: fallback to safe request path");
+    }
     char *absolute = request->absolute;
-    const bool service = url[0] == '/';
+    const bool compressed_shard = !chunk && service &&
+        !strncmp(url, "/web/book/chapter/", sizeof("/web/book/chapter/") - 1);
     request->capture_service_cookies = service;
     bool upgrade = !service && !strncmp(url, "http://", 7);
     const char *prefix = service ? WR_HOST : upgrade ? "https://" : "";
@@ -710,9 +795,9 @@ static char *http_request(const char *url, const char *body, const char *referer
     memcpy(request->cookie_snapshot, s_cookies, sizeof(request->cookie_snapshot));
     request->cookie_snapshot[sizeof(request->cookie_snapshot)-1] = 0;
     cookie_unlock();
-    /* Keep the proven open/fetch/read path for complete responses. The experimental
-     * esp_http_client_perform() keep-alive path returned non-2xx during a real
-     * WeRead cache request; do not reuse it until the server response is diagnosed. */
+    /* Safe fallback path. Cache jobs try the reusable perform() path above;
+     * its per-job circuit breaker routes all remaining requests here after the
+     * first transport, status, or decode failure. */
     http_keepalive_drop();
     esp_http_client_config_t config = {
         /* Keep the HTTP/TLS working set modest on S31: the panel and Wi-Fi
@@ -725,18 +810,23 @@ static char *http_request(const char *url, const char *body, const char *referer
     };
     esp_http_client_handle_t http = esp_http_client_init(&config);
     if (!http) { s_error_message = "无法创建网络请求"; free(request); return NULL; }
-    esp_http_client_set_header(http, "Accept-Encoding", "identity");
+    esp_http_client_set_header(http, "Accept-Encoding", (chunk || compressed_shard) ? "gzip" : "identity");
     esp_http_client_set_header(http, "Referer", referer ? referer : WR_HOST "/");
     if (service) {
         esp_http_client_set_header(http,"Accept","application/json, text/plain, */*");
         esp_http_client_set_header(http,"Origin",WR_HOST);
         if (request->cookie_snapshot[0]) esp_http_client_set_header(http,"Cookie",request->cookie_snapshot);
     }
+    if (res_archive && request->cookie_snapshot[0])
+        esp_http_client_set_header(http, "Cookie", request->cookie_snapshot);
     if (body) {
         esp_http_client_set_method(http, HTTP_METHOD_POST);
         esp_http_client_set_header(http, "Content-Type", "application/json;charset=UTF-8");
     }
     char *data = NULL;
+    wr_body_decoder_t *reader_decoder = NULL, *shard_decoder = NULL;
+    char *shard_input = NULL;
+    wr_body_buffer_t shard_sink = {.limit = limit, .resize = wr_shard_resize};
     size_t used = 0, capacity = 0;
     int64_t scan_wait_until = 0;
     int64_t reader_deadline = chunk && s_processing_report ? esp_timer_get_time() + 90000000 : 0;
@@ -784,6 +874,8 @@ static char *http_request(const char *url, const char *body, const char *referer
                 s_error_message = "微信读书图片重定向地址不受支持";
                 goto cleanup;
             }
+            /* Never forward WeRead cookies to CDN signed redirect URLs. */
+            if (res_archive) (void)esp_http_client_delete_header(http, "Cookie");
             if (!wr_url_allowed(redirected,false) || esp_http_client_set_url(http,redirected)!=ESP_OK) {
                 ESP_LOGW("WEREAD","cover redirect target rejected location='%s' target='%s'",request->location,redirected);
                 s_error_message = "微信读书图片重定向地址不受支持";
@@ -801,7 +893,7 @@ static char *http_request(const char *url, const char *body, const char *referer
             s_error_message = "微信读书图片重定向地址不受支持";
             goto cleanup;
         }
-        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", url, redirected);
+        ESP_LOGI("WEREAD", "HTTP redirect service=%d archive=%d", (int)service, (int)res_archive);
         snprintf(request->current,sizeof(request->current),"%s",redirected);
         if (code == 301 || code == 302 || code == 303) {
             body_size = 0;
@@ -817,6 +909,13 @@ static char *http_request(const char *url, const char *body, const char *referer
     if (declared < 0) declared = 0;
     while (!wr_cancelled()) {
         if (chunk) {
+            if (!reader_decoder) {
+                reader_decoder = heap_caps_malloc(sizeof(*reader_decoder),
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!reader_decoder) { allocation_failed = true; goto cleanup; }
+                wr_body_decoder_init(reader_decoder, chunk, context,
+                                     8 * 1024 * 1024, wr_reader_zalloc, wr_reader_zfree);
+            }
             if (reader_deadline && esp_timer_get_time() >= reader_deadline) {
                 ESP_LOGW("WEREAD", "report reader response deadline bytes=%u", (unsigned)used);
                 goto cleanup;
@@ -840,15 +939,86 @@ static char *http_request(const char *url, const char *body, const char *referer
             int n = esp_http_client_read(http, data, (int)(remaining < 2048 ? remaining : 2048));
             if (n < 0) { read_failed = true; goto cleanup; }
             used += (size_t)n;
-            if (n && chunk(data, (size_t)n, context)) {
-                *fields_received = true;
-                break;
+            if (n) {
+                int decode_status = wr_body_decoder_feed(reader_decoder, data, (size_t)n);
+                if (decode_status < 0) { read_failed = true; goto cleanup; }
+                if (decode_status > 0) {
+                    *fields_received = true;
+                    break;
+                }
             }
             if (!n || esp_http_client_is_complete_data_received(http)) {
                 complete = esp_http_client_is_complete_data_received(http);
+                if (complete) {
+                    int decode_status = wr_body_decoder_finish(reader_decoder);
+                    if (decode_status < 0) { read_failed = true; complete = false; goto cleanup; }
+                    if (decode_status > 0) *fields_received = true;
+                }
                 break;
             }
             if (s_processing_report) vTaskDelay(1);
+            continue;
+        }
+        if (compressed_shard) {
+            /* Never hold both the compressed response and the inflated body in RAM.
+             * The only wire buffer is 2 KiB; validated, bounded decoded bytes
+             * accumulate directly into their final PSRAM allocation. */
+            if (!shard_decoder) {
+                shard_input = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                shard_decoder = heap_caps_malloc(sizeof(*shard_decoder),
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!shard_input || !shard_decoder) { allocation_failed = true; goto cleanup; }
+                wr_body_decoder_init(shard_decoder, wr_body_buffer_write, &shard_sink,
+                                     limit, wr_reader_zalloc, wr_reader_zfree);
+            }
+            size_t remaining = limit - used;
+            if (!remaining) {
+                /* A compressed response can legitimately end at exactly limit.
+                 * Finalize it without reading a byte past the allowed limit. */
+                complete = esp_http_client_is_complete_data_received(http);
+                if (!complete || wr_body_decoder_finish(shard_decoder) != 0 ||
+                    !shard_sink.data) {
+                    complete = false;
+                    read_failed = true;
+                } else {
+                    size_t wire_bytes = used;
+                    data = shard_sink.data;
+                    shard_sink.data = NULL;
+                    used = shard_sink.used;
+                    ESP_LOGI("WEREAD", "chapter shard decoded wire=%u bytes=%u",
+                             (unsigned)wire_bytes, (unsigned)used);
+                }
+                break;
+            }
+            int n = esp_http_client_read(http, shard_input,
+                                         (int)(remaining < 2048 ? remaining : 2048));
+            if (n < 0) { read_failed = true; goto cleanup; }
+            used += (size_t)n;
+            if (n) {
+                int decoded = wr_body_decoder_feed(shard_decoder, shard_input, (size_t)n);
+                if (decoded != 0 || shard_sink.failed) {
+                    allocation_failed = shard_sink.failed;
+                    read_failed = !allocation_failed;
+                    goto cleanup;
+                }
+            }
+            if (!n || esp_http_client_is_complete_data_received(http)) {
+                complete = esp_http_client_is_complete_data_received(http);
+                if (complete && wr_body_decoder_finish(shard_decoder) != 0) {
+                    complete = false;
+                    read_failed = true;
+                    goto cleanup;
+                }
+                if (complete && shard_sink.data) {
+                    size_t wire_bytes = used;
+                    data = shard_sink.data;
+                    shard_sink.data = NULL;
+                    used = shard_sink.used;
+                    ESP_LOGI("WEREAD", "chapter shard decoded wire=%u bytes=%u",
+                             (unsigned)wire_bytes, (unsigned)used);
+                }
+                break;
+            }
             continue;
         }
         if (used == capacity) {
@@ -869,6 +1039,16 @@ static char *http_request(const char *url, const char *body, const char *referer
         }
     }
 cleanup:
+    if (reader_decoder) {
+        wr_body_decoder_close(reader_decoder);
+        free(reader_decoder);
+    }
+    if (shard_decoder) {
+        wr_body_decoder_close(shard_decoder);
+        free(shard_decoder);
+    }
+    free(shard_input);
+    free(shard_sink.data);
     esp_http_client_cleanup(http);
     free(request);
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
@@ -891,6 +1071,18 @@ cleanup:
              (long long)((esp_timer_get_time()-request_started_us)/1000));
     if (length) *length = used;
     return data;
+}
+
+static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
+                          size_t *length, wr_http_chunk_fn chunk, void *context,
+                          bool *fields_received, bool *post_started) {
+    /* One active TLS request at a time: prefetch overlaps CPU/SD work rather
+     * than introducing the multiple TLS contexts that regress on S31. */
+    if (s_http_gate) xSemaphoreTake(s_http_gate, portMAX_DELAY);
+    char *result = http_request_impl(url, body, referer, limit, length, chunk,
+                                     context, fields_received, post_started);
+    if (s_http_gate) xSemaphoreGive(s_http_gate);
+    return result;
 }
 
 char *wr_http(const char *url, const char *body, const char *referer, size_t limit, size_t *length) {
@@ -1441,6 +1633,11 @@ static void run_work(const wr_work_t *work) {
     const int64_t work_started_us = esp_timer_get_time();
     bool ok = false;
     const bool cache_radio_boost = work->kind == WR_CACHE && wr_online();
+    if (work->kind == WR_CACHE) {
+        s_http_shard_fast_disabled = false;
+        s_http_shard_fast_hits = s_http_shard_fast_fallbacks = 0;
+        atomic_store(&s_cache_cookie_dirty, false);
+    }
     if (cache_radio_boost) {
         radio_hold(true);
         ESP_LOGI("WEREAD", "cache radio performance mode enabled");
@@ -1498,6 +1695,18 @@ static void run_work(const wr_work_t *work) {
     } else if (!wr_cancelled()) {
         s_error_message = "登录已失效，请重新扫码";
         s_expired = true;
+    }
+    if (work->kind == WR_CACHE) {
+        /* Deferred NVS writes belong on the original internal-stack worker. */
+        if (atomic_exchange(&s_cache_cookie_dirty, false)) {
+            cookie_lock();
+            save_session_cookies();
+            cookie_unlock();
+        }
+        ESP_LOGI("WEREAD", "cache shard keep-alive hits=%u fallbacks=%u disabled=%d",
+                 s_http_shard_fast_hits, s_http_shard_fast_fallbacks,
+                 (int)s_http_shard_fast_disabled);
+        http_keepalive_drop();
     }
     if (cache_radio_boost) {
         radio_hold(false);
@@ -1695,8 +1904,9 @@ static void worker_task(void *arg) {
 void wr_init(void) {
     if (s_worker) return;
     if (!s_cookie_mutex) s_cookie_mutex = xSemaphoreCreateMutexStatic(&s_cookie_mutex_storage);
-    if (!s_cookie_mutex) {
-        ESP_LOGE("WEREAD", "cookie mutex initialization failed");
+    if (!s_http_gate) s_http_gate = xSemaphoreCreateMutexStatic(&s_http_gate_storage);
+    if (!s_cookie_mutex || !s_http_gate) {
+        ESP_LOGE("WEREAD", "HTTP/cookie mutex initialization failed");
         return;
     }
     s_worker = xTaskCreateStatic(worker_task, "weread", sizeof(s_worker_stack),

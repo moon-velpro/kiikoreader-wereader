@@ -1,4 +1,7 @@
 #include "weread_internal.h"
+#include "weread_zip_stream.h"
+#include "weread_prefetch.h"
+#include "weread_tar.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -23,6 +26,31 @@
 #include "freertos/task.h"
 
 typedef struct { FILE *file, *directory; uint16_t count; } epub_writer_t;
+
+/* Observational counters only; no change to request order or buffer ownership. */
+static uint64_t s_cache_image_elapsed_us;
+#define WR_PREFETCH_CHAPTER 1
+#define WR_IMG_TAR_LIMIT (8u * 1024u * 1024u)
+
+static const void *s_active_tar;
+static size_t s_active_tar_bytes;
+static unsigned s_tar_image_hits, s_tar_image_fallbacks;
+
+typedef struct {
+    const wr_book_t *book;
+    const wr_chapter_t *chapters;
+} cache_prefetch_input_t;
+
+typedef struct {
+    char *content;
+    size_t content_size;
+    bool plain;
+    char *tar;
+    size_t tar_size;
+} cache_prefetch_result_t;
+
+static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain);
+static void cache_prefetch_release(void *result);
 
 static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chapter,
                                  bool *plain, size_t *size, unsigned index) {
@@ -116,12 +144,17 @@ static bool write_xml(FILE *file, const char *text, size_t size) {
 }
 
 static bool file_entry(epub_writer_t *zip, const char *name, FILE *entry, size_t max) {
-    long end = ftell(entry);
-    if (end < 0 || (size_t)end > max || fseek(entry, 0, SEEK_SET)) return false;
-    char *data = heap_caps_malloc((size_t)end+1, MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-    if (!data) return false;
-    bool ok = fread(data, 1, end, entry) == (size_t)end && zip_entry(zip, name, data, end);
-    free(data);
+    if (!zip || !entry || zip->count >= ZIP_ENTRY_MAX) return false;
+    /* Stream the existing chapter/OPF/nav staging file into the ZIP once,
+     * instead of allocating and copying the entire file into PSRAM. */
+    const size_t scratch_bytes = 8192;
+    char *scratch = heap_caps_malloc(scratch_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!scratch) return false;
+    if (max > ZIP_OUTPUT_MAX) max = ZIP_OUTPUT_MAX;
+    bool ok = wr_zip_append_stored_file(zip->file, zip->directory, entry,
+                                         name, max, scratch, scratch_bytes);
+    if (ok) ++zip->count;
+    free(scratch);
     return ok;
 }
 
@@ -131,6 +164,44 @@ static const char *image_extension(const char *data, size_t length, const char *
     if (book_webp_is((const uint8_t *)data, length)) { *mime = "image/webp"; return "webp"; }
     if (book_gif_is((const uint8_t *)data, length)) { *mime = "image/gif"; return "gif"; }
     return NULL;
+}
+
+/* Exact-source deduplication: only reuse images that have already been
+ * successfully added to this EPUB. Tokens remain in PSRAM and are never logged. */
+#define WR_IMAGE_REUSE_SLOTS 48
+typedef struct { char *url; char entry[40]; } wr_image_reuse_t;
+static EXT_RAM_BSS_ATTR wr_image_reuse_t s_image_reuse[WR_IMAGE_REUSE_SLOTS];
+static unsigned s_image_reuse_count, s_image_reuse_hits;
+
+static void image_reuse_reset(void) {
+    for (unsigned i = 0; i < s_image_reuse_count; ++i) {
+        free(s_image_reuse[i].url);
+        s_image_reuse[i].url = NULL;
+    }
+    s_image_reuse_count = 0;
+    s_image_reuse_hits = 0;
+}
+
+static bool image_reuse_find(const char *url, char name[40]) {
+    for (unsigned i = 0; i < s_image_reuse_count; ++i) {
+        if (!strcmp(url, s_image_reuse[i].url)) {
+            snprintf(name, 40, "%s", s_image_reuse[i].entry);
+            ++s_image_reuse_hits;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void image_reuse_add(const char *url, const char *name) {
+    if (s_image_reuse_count >= WR_IMAGE_REUSE_SLOTS) return;
+    size_t size = strlen(url) + 1;
+    char *copy = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) return; /* Deduplication is best-effort; preserve download path. */
+    memcpy(copy, url, size);
+    wr_image_reuse_t *slot = &s_image_reuse[s_image_reuse_count++];
+    slot->url = copy;
+    snprintf(slot->entry, sizeof(slot->entry), "%s", name);
 }
 
 static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t size, unsigned id, char name[40]) {
@@ -143,15 +214,45 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
         else url[used++] = src[i];
     }
     url[used] = 0;
+    if (image_reuse_find(url, name)) return !wr_cancelled();
     int64_t image_started = esp_timer_get_time();
-    size_t length;
-    char *data = NULL;
+    size_t length = 0;
+    const void *borrowed = NULL;
+    bool tar_candidate = wr_tar_image_url(url, strlen(url));
+    bool from_tar = s_active_tar && tar_candidate &&
+                    wr_tar_find_image(s_active_tar, s_active_tar_bytes,
+                                      url, strlen(url), &borrowed, &length);
+    char *data = from_tar ? (char *)borrowed : NULL;
+    if (from_tar) {
+        const char *tar_mime = NULL;
+        if (length > 4u * 1024u * 1024u || !image_extension(data, length, &tar_mime)) {
+            /* The archive can contain non-image or oversized entries. Keep the
+             * old per-image path as the correctness fallback. */
+            data = NULL;
+            length = 0;
+            from_tar = false;
+        } else {
+            ++s_tar_image_hits;
+        }
+    }
+    if (tar_candidate && !from_tar) ++s_tar_image_fallbacks;
+    size_t image_limit = 4u * 1024u * 1024u;
+    if (!data) {
+        size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        image_limit = free_psram / 2u; /* do not starve a concurrent next-chapter prefetch */
+        if (image_limit > 4u * 1024u * 1024u) image_limit = 4u * 1024u * 1024u;
+        if (image_limit < 64u * 1024u) {
+            name[0] = 0;
+            return !wr_cancelled();
+        }
+    }
     for (unsigned attempt = 0; attempt < 3 && !data && !wr_cancelled(); ++attempt) {
-        data = wr_http(url, NULL, NULL, 4*1024*1024, &length);
+        data = wr_http(url, NULL, NULL, image_limit, &length);
         if (!data && !strcmp(wr_error_message(), "微信读书图片地址不受支持")) break;
         if (!data && attempt < 2) vTaskDelay(pdMS_TO_TICKS(350u * (attempt + 1)));
     }
     if (!data) {
+        s_cache_image_elapsed_us += (uint64_t)(esp_timer_get_time() - image_started);
         ESP_LOGW("WEREAD", "cache image id=%u elapsed_ms=%lld result=0 error=%s", id,
                  (long long)((esp_timer_get_time() - image_started) / 1000), wr_error_message());
         /* CrossMux treats embedded illustrations as best-effort: a transient
@@ -164,44 +265,69 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     bool ok = !ext || (zip_entry(zip, name, data, length) &&
         fprintf(opf, "<item id=\"i%u\" href=\"%s\" media-type=\"%s\"%s/>", id, name, mime,
                 id == 0 ? " properties=\"cover-image\"" : "") >= 0);
+    s_cache_image_elapsed_us += (uint64_t)(esp_timer_get_time() - image_started);
     ESP_LOGI("WEREAD", "cache image id=%u bytes=%u elapsed_ms=%lld result=%d", id,
              (unsigned)length, (long long)((esp_timer_get_time() - image_started) / 1000), ok);
+    if (ok && ext) image_reuse_add(url, name);
     if (!ext) name[0] = 0;
-    free(data);
+    if (!from_tar) free(data);
     if (!ok) wr_error_set("缓存失败：图片写入 EPUB 失败");
     return ok;
 }
 
-static const char *tag_end(const char *start) {
-    char quote = 0;
-    for (const char *p = start; *p; ++p) {
-        if (quote) { if (*p == quote) quote = 0; }
-        else if (*p == '\'' || *p == '"') quote = *p;
-        else if (*p == '>') return p;
-    }
-    return NULL;
+static char *cache_fetch_tar(const wr_book_t *book, const wr_chapter_t *chapter,
+                             const char *content, bool plain, size_t *tar_bytes) {
+    if (tar_bytes) *tar_bytes = 0;
+    if (!chapter->tar[0] || plain || !wr_tar_chapter_has_images(content) || wr_cancelled())
+        return NULL;
+    char tar_url[384], reader_referer[384];
+    const char *src = chapter->tar;
+    int n = !strncmp(src, "//", 2)
+          ? snprintf(tar_url, sizeof(tar_url), "https:%s", src)
+          : !strncmp(src, "http://", 7)
+          ? snprintf(tar_url, sizeof(tar_url), "https:%s", src + 7)
+          : *src == '/'
+          ? snprintf(tar_url, sizeof(tar_url), "https://res.weread.qq.com%s", src)
+          : snprintf(tar_url, sizeof(tar_url), "%s", src);
+    if (n <= 0 || n >= (int)sizeof(tar_url) ||
+        !wr_reader_referer(book->id, chapter->id, reader_referer)) return NULL;
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t limit = free_psram / 2u; /* leave half the live PSRAM for chapter buffers and UI */
+    if (limit > WR_IMG_TAR_LIMIT) limit = WR_IMG_TAR_LIMIT;
+    if (limit < 128u * 1024u) return NULL;
+    int64_t started = esp_timer_get_time();
+    char *data = wr_http(tar_url, NULL, reader_referer, limit, tar_bytes);
+    ESP_LOGI("WEREAD", "cache chapter tar index=%u bytes=%u limit=%u free_psram=%u elapsed_ms=%lld ok=%d",
+             chapter->index, (unsigned)(tar_bytes ? *tar_bytes : 0), (unsigned)limit,
+             (unsigned)free_psram, (long long)((esp_timer_get_time() - started) / 1000),
+             (int)(data != NULL));
+    return data;
 }
 
-static const char *image_src(const char *p, const char *end, size_t *length) {
-    while (p < end) {
-        while (p < end && isspace((unsigned char)*p)) ++p;
-        const char *key = p;
-        while (p < end && !strchr("= \r\n\t", *p)) ++p;
-        size_t key_size = p-key;
-        while (p < end && isspace((unsigned char)*p)) ++p;
-        if (p == end || *p != '=') continue;
-        do { ++p; } while (p < end && isspace((unsigned char)*p));
-        if (p == end) break;
-        char quote = (*p == '"' || *p == '\'') ? *p++ : 0;
-        const char *value = p;
-        while (p < end && (quote ? *p != quote : !isspace((unsigned char)*p))) ++p;
-        if ((key_size == 3 && !strncasecmp(key,"src",3)) || (key_size == 9 && !strncasecmp(key,"xlink:href",9))) {
-            *length = p-value;
-            return value;
-        }
-        if (quote && p < end) ++p;
+static void cache_prefetch_release(void *opaque) {
+    cache_prefetch_result_t *result = opaque;
+    if (!result) return;
+    free(result->content);
+    free(result->tar);
+    free(result);
+}
+
+static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain) {
+    cache_prefetch_input_t *input = arg;
+    cache_prefetch_result_t *result = heap_caps_calloc(1, sizeof(*result),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!result) return NULL;
+    result->content = cache_fetch_chapter(input->book, &input->chapters[index],
+                                          &result->plain, &result->content_size, index);
+    if (!result->content) {
+        free(result);
+        return NULL;
     }
-    return NULL;
+    result->tar = cache_fetch_tar(input->book, &input->chapters[index],
+                                  result->content, result->plain, &result->tar_size);
+    if (size) *size = sizeof(*result);
+    if (plain) *plain = result->plain;
+    return result;
 }
 
 static unsigned utf16_at(const char *text, size_t bytes) {
@@ -249,18 +375,22 @@ static bool rewrite_chapter(FILE *output, FILE *opf, epub_writer_t *zip, const c
         }
     } else {
         const char *p = strcasestr(data, "<body");
-        if (p) { p = tag_end(p); if (p) ++p; }
+        if (p) { p = wr_tar_tag_end(p); if (p) ++p; }
         if (!p) p = data;
+        const char *data_end = data + strlen(data);
         unsigned offset = utf16_at(data,p-data);
-        while (*p && !wr_cancelled()) {
-            if (!strncasecmp(p, "</body", 6)) break;
-            bool image = !strncasecmp(p,"<img",4) && (isspace((unsigned char)p[4]) || p[4] == '>');
-            bool svg = !strncasecmp(p,"<image",6) && isspace((unsigned char)p[6]);
+        while (p < data_end && !wr_cancelled()) {
+            size_t remaining = (size_t)(data_end - p);
+            if (remaining >= 6 && !strncasecmp(p, "</body", 6)) break;
+            bool image = remaining >= 4 && !strncasecmp(p,"<img",4) &&
+                         (p[4] == '>' || isspace((unsigned char)p[4]));
+            bool svg = remaining >= 6 && !strncasecmp(p,"<image",6) &&
+                       isspace((unsigned char)p[6]);
             if (image || svg) {
-                const char *end = tag_end(p);
+                const char *end = wr_tar_tag_end(p);
                 if (!end) return false;
                 size_t length;
-                const char *src = image_src(p+(image?4:6), end, &length);
+                const char *src = wr_tar_image_src(p+(image?4:6), end, &length);
                 char name[40];
                 if (src && gif_source(src, length)) {
                     offset += utf16_at(p,end+1-p);
@@ -274,7 +404,7 @@ static bool rewrite_chapter(FILE *output, FILE *opf, epub_writer_t *zip, const c
                 offset += utf16_at(p,end+1-p);
                 p = end+1;
             } else if (*p == '<') {
-                const char *end = tag_end(p);
+                const char *end = wr_tar_tag_end(p);
                 if (!end || fwrite(p,1,end+1-p,output) != (size_t)(end+1-p)) return false;
                 offset += utf16_at(p,end+1-p);
                 p = end+1;
@@ -363,6 +493,10 @@ static wr_chapter_t *get_chapters(const wr_book_t *book, unsigned *count) {
         const cJSON *index = cJSON_GetObjectItemCaseSensitive(entry, "chapterIdx");
         item->index = cJSON_IsNumber(index) && index->valuedouble >= 0 && index->valuedouble <= UINT32_MAX ? (uint32_t)index->valuedouble : *count;
         (void)wr_value(cJSON_GetObjectItemCaseSensitive(entry,"title"), item->title, sizeof(item->title));
+        const cJSON *tar = cJSON_GetObjectItemCaseSensitive(entry, "tar");
+        if (cJSON_IsString(tar) && tar->valuestring &&
+            strlen(tar->valuestring) < sizeof(item->tar))
+            snprintf(item->tar, sizeof(item->tar), "%s", tar->valuestring);
         ++*count;
     }
     cJSON_Delete(toc);
@@ -402,16 +536,59 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         write_xml(opf, book->author, strlen(book->author)) &&
         fputs("</dc:creator><dc:language>zh</dc:language></metadata><manifest><item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>", opf) != EOF &&
         fputs("<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><body><nav epub:type=\"toc\"><ol>", nav) != EOF;
+    image_reuse_reset();
+    s_cache_image_elapsed_us = 0;
+    s_active_tar = NULL;
+    s_active_tar_bytes = 0;
+    s_tar_image_hits = s_tar_image_fallbacks = 0;
     if (ok && book->cover[0]) {
         char name[40];
         ok = image_entry(&zip, opf, book->cover, strlen(book->cover), 0, name);
     }
     unsigned image_id = 1;
+    cache_prefetch_input_t prefetch_input = {.book = book, .chapters = chapters};
+    wr_prefetch_t prefetch = {0};
+    bool prefetch_enabled = false;
+#if WR_PREFETCH_CHAPTER
+    if (ok && count > 1) {
+        prefetch_enabled = wr_prefetch_begin(&prefetch, cache_prefetch_fetch,
+                                             cache_prefetch_release, &prefetch_input);
+        ESP_LOGI("WEREAD", "cache chapter prefetch enabled=%d psram_free=%u",
+                 (int)prefetch_enabled,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+#endif
+    uint64_t prefetch_wait_us = 0;
+    unsigned prefetch_hits = 0;
+    uint64_t fetch_elapsed_us = 0;
+    uint64_t transform_elapsed_us = 0;
+    uint64_t chapter_elapsed_us = 0;
     for (unsigned i = 0; ok && i < count && !wr_cancelled(); ++i) {
         int64_t chapter_started = esp_timer_get_time();
-        size_t size = 0;
+        uint64_t image_before_us = s_cache_image_elapsed_us;
+        size_t size = 0, tar_bytes = 0;
         bool plain = false;
-        char *content = cache_fetch_chapter(book, &chapters[i], &plain, &size, i);
+        int64_t fetch_started = esp_timer_get_time();
+        cache_prefetch_result_t *prefetched = NULL;
+        char *content = NULL, *tar_data = NULL;
+        if (prefetch_enabled && i) {
+            prefetched = wr_prefetch_take(&prefetch, i, NULL, NULL);
+            prefetch_wait_us += (uint64_t)(esp_timer_get_time() - fetch_started);
+            if (prefetched) {
+                content = prefetched->content;
+                size = prefetched->content_size;
+                plain = prefetched->plain;
+                tar_data = prefetched->tar;
+                tar_bytes = prefetched->tar_size;
+                ++prefetch_hits;
+            }
+        }
+        if (!content && !wr_cancelled()) {
+            content = cache_fetch_chapter(book, &chapters[i], &plain, &size, i);
+            if (content)
+                tar_data = cache_fetch_tar(book, &chapters[i], content, plain, &tar_bytes);
+        }
+        fetch_elapsed_us += (uint64_t)(esp_timer_get_time() - fetch_started);
         if (!content) {
             if (!wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
                 wr_error_set("缓存失败：章节下载失败（已自动重试 3 次）");
@@ -422,9 +599,17 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         if (size >= 4 && !memcmp(content, "PK\003\004", 4)) {
             ok = !i && !fseek(target, 0, SEEK_SET) && fwrite(content, 1, size, target) == size &&
                 !fflush(target) && !ftruncate(fileno(target), size);
-            free(content);
+            if (prefetched) cache_prefetch_release(prefetched);
+            else { free(content); free(tar_data); }
             goto cleanup;
         }
+        /* The current chapter and its TAR are now both ready. Start fetching
+         * the next chapter plus its TAR while this chapter is rewritten. */
+        if (prefetch_enabled && i + 1 < count && !wr_cancelled())
+            (void)wr_prefetch_arm(&prefetch, i + 1);
+        s_active_tar = tar_data;
+        s_active_tar_bytes = tar_bytes;
+        int64_t transform_started = esp_timer_get_time();
         char name[40];
         snprintf(name, sizeof(name), "c%u.xhtml", i);
         FILE *chapter = fopen(WR_DIR "/chapter.part", "w+b");
@@ -435,13 +620,22 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             fprintf(nav,"<li><a href=\"%s\">",name) >= 0 && write_xml(nav,chapters[i].title,strlen(chapters[i].title)) &&
             fputs("</a></li>",nav) != EOF;
         if (chapter) fclose(chapter);
-        ESP_LOGI("WEREAD", "cache chapter book=%s index=%u/%u html_bytes=%u elapsed_ms=%lld result=%d",
+        s_active_tar = NULL;
+        s_active_tar_bytes = 0;
+        uint64_t transform_us = (uint64_t)(esp_timer_get_time() - transform_started);
+        transform_elapsed_us += transform_us;
+        chapter_elapsed_us += (uint64_t)(esp_timer_get_time() - chapter_started);
+        ESP_LOGI("WEREAD", "cache chapter book=%s index=%u/%u html_bytes=%u fetch_ms=%lld transform_ms=%lld image_ms=%lld elapsed_ms=%lld result=%d",
                  book->id, i+1, count, (unsigned)size,
+                 (long long)((esp_timer_get_time() - fetch_started) / 1000),
+                 (long long)(transform_us / 1000),
+                 (long long)((s_cache_image_elapsed_us - image_before_us) / 1000),
                  (long long)((esp_timer_get_time()-chapter_started)/1000), ok);
         if (!ok && !wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
             wr_error_set("缓存失败：章节内容处理或图片下载失败");
         if (!ok) ESP_LOGE("WEREAD","cache package failed book=%s chapter=%u title=%s error=%s",book->id,i,chapters[i].title,wr_error_message());
-        free(content);
+        if (prefetched) cache_prefetch_release(prefetched);
+        else { free(content); free(tar_data); }
         wr_work_progress(i+1, count);
         /* Let idle/UI and watchdog service run between CPU-heavy chapter conversions. */
         vTaskDelay(1);
@@ -453,7 +647,20 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             file_entry(&zip, "book.opf", opf, HTML_TEXT_MAX_BYTES) &&
             file_entry(&zip, "nav.xhtml", nav, HTML_TEXT_MAX_BYTES) && zip_finish(&zip);
     } else ok = false;
+    ESP_LOGI("WEREAD", "cache profile book=%s chapters=%u fetch_ms=%lld transform_ms=%lld image_ms=%lld chapter_wall_ms=%lld",
+             book->id, count,
+             (long long)(fetch_elapsed_us / 1000),
+             (long long)(transform_elapsed_us / 1000),
+             (long long)(s_cache_image_elapsed_us / 1000),
+             (long long)(chapter_elapsed_us / 1000));
+    ESP_LOGI("WEREAD", "cache prefetch hits=%u wait_ms=%lld enabled=%d",
+             prefetch_hits, (long long)(prefetch_wait_us / 1000), (int)prefetch_enabled);
 cleanup:
+    if (prefetch_enabled) wr_prefetch_end(&prefetch);
+    ESP_LOGI("WEREAD", "cache image reuse hits=%u stored=%u tar_images=%u tar_fallbacks=%u",
+             s_image_reuse_hits, s_image_reuse_count, s_tar_image_hits,
+             s_tar_image_fallbacks);
+    image_reuse_reset();
     if (nav) fclose(nav);
     if (opf) fclose(opf);
     if (central) fclose(central);

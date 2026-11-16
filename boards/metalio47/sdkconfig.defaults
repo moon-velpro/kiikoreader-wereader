@@ -17,6 +17,9 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # 1ms tick：EPD 上电流程里按毫秒轮询 PGOOD，100Hz 的 tick 会把每次等待放大到 10ms
 CONFIG_FREERTOS_HZ=1000
+# Only the network-only WeRead prefetch worker uses a PSRAM stack; flash/NVS
+# writes stay on the original internal-stack work task.
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 # 长文件名以 UTF-8 交给界面与 fopen；磁盘 LFN 保持 UTF-16，不需要增加 CP936 表。
 # Pass long filenames to UI and fopen as UTF-8; on-disk LFN stays UTF-16 without a CP936 table.
 CONFIG_FATFS_LFN_HEAP=y

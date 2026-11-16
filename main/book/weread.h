@@ -13,7 +13,7 @@ typedef struct {
 } wr_book_t;
 
 typedef struct {
-    char id[WR_ID], title[128];
+    char id[WR_ID], title[128], tar[256];
     unsigned index;
 } wr_chapter_t;
 
