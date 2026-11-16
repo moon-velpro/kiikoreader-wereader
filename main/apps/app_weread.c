@@ -444,8 +444,8 @@ static app_redraw_t tick(app_ctx_t *ctx) {
                     return APP_REDRAW_NONE;
                 s_progress_bucket = bucket;
                 s_progress_valid = true;
-                draw_work_progress(ctx->fb);
 #if WR_PROGRESS_AREA
+                draw_work_progress(ctx->fb);
                 return APP_REDRAW_AREA;
 #else
                 return APP_REDRAW_PAGE;
