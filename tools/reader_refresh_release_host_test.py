@@ -21,6 +21,8 @@ static bool s_shelf_page_key_valid,s_shelf_page_loading,s_shelf_page_cached;
 #include <stdio.h>
 #include <string.h>
 typedef int e0470_turn_dir_t;
+static int s_visible_count;
+static bool s_shelf_cover_hint_dirty;
 typedef struct {int x,y,width,height;} EpdRect;
 typedef struct {void *hl;uint8_t *fb;int64_t now_ms;bool request_app;} app_ctx_t;
 typedef enum {APP_REDRAW_NONE,APP_REDRAW_AREA,APP_REDRAW_PAGE,APP_REDRAW_FULL,APP_REDRAW_DONE} app_redraw_t;
