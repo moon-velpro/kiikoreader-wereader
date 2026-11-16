@@ -36,7 +36,7 @@
 
 #define WR_MAX_SHELF 8192
 #define WR_REPORT_COUNT 17 /* 16 normal slots plus one overflow reserve. */
-#define WR_REPORT_STORE_MAGIC UINT32_C(0x57525231)
+#define WR_REPORT_STORE_MAGIC UINT32_C(0x57525232)
 #define WR_INDEX WR_DIR "/shelf.bin"
 #define WR_INDEX_TEMP WR_DIR "/shelf.part"
 #define WR_CACHED WR_DIR "/cached.bin"
@@ -63,8 +63,13 @@ typedef struct {
     uint32_t library, seconds;
 } wr_report_store_entry_t;
 typedef struct {
+    char book_id[WR_ID], owner[WR_ID];
+    uint32_t library, milliseconds;
+} wr_reading_store_t;
+typedef struct {
     uint32_t magic;
     wr_report_store_entry_t entries[WR_REPORT_COUNT];
+    wr_reading_store_t deferred_reading;
 } wr_report_store_t;
 _Static_assert(sizeof(wr_report_store_t) <= 1900, "WeRead report queue must fit in one NVS blob");
 
@@ -130,6 +135,7 @@ static struct {
     uint32_t ms;
     bool attached;
 } s_reading;
+static wr_reading_store_t s_deferred_reading;
 static bool s_radio_held;
 
 static void restore_session_cookie(void);
@@ -202,6 +208,10 @@ static bool persist_report_queue(void) {
         target->seconds = source->seconds;
         any = true;
     }
+    if (s_deferred_reading.milliseconds >= 1000) {
+        snapshot.deferred_reading = s_deferred_reading;
+        any = true;
+    }
     portEXIT_CRITICAL(&s_lock);
 
     nvs_handle_t nvs;
@@ -250,6 +260,20 @@ static void load_report_queue(void) {
         target->failures = 0;
         target->retry_at = 0;
         ++loaded;
+    }
+    if (stored.deferred_reading.milliseconds >= 1000 &&
+        memchr(stored.deferred_reading.book_id, 0, sizeof(stored.deferred_reading.book_id)) &&
+        memchr(stored.deferred_reading.owner, 0, sizeof(stored.deferred_reading.owner)) &&
+        wr_safe(stored.deferred_reading.book_id) && wr_safe(stored.deferred_reading.owner)) {
+        s_deferred_reading = stored.deferred_reading;
+        memset(&s_reading, 0, sizeof(s_reading));
+        memcpy(s_reading.book.id, stored.deferred_reading.book_id, sizeof(s_reading.book.id));
+        memcpy(s_reading.owner, stored.deferred_reading.owner, sizeof(s_reading.owner));
+        s_reading.library = stored.deferred_reading.library;
+        s_reading.ms = stored.deferred_reading.milliseconds;
+        s_reading.attached = false;
+        s_reading.last = 0;
+        ESP_LOGI("WEREAD", "restored deferred reading seconds=%u", s_reading.ms / 1000);
     }
     if (loaded) ESP_LOGI("WEREAD", "restored pending report queue entries=%u", loaded);
 }
@@ -1910,6 +1934,14 @@ static bool report_reading(void) {
     portEXIT_CRITICAL(&s_lock);
     if (!accepted) return false;
     s_reading.ms %= 1000;
+    if (!s_reading.attached && s_deferred_reading.milliseconds) {
+        portENTER_CRITICAL(&s_lock);
+        if (s_deferred_reading.library == job.library &&
+            !strcmp(s_deferred_reading.owner, job.owner) &&
+            !strcmp(s_deferred_reading.book_id, job.book_id))
+            memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
+        portEXIT_CRITICAL(&s_lock);
+    }
     if (!persist_report_queue())
         ESP_LOGW("WEREAD", "persist pending reading report failed seconds=%u", seconds);
     xTaskNotifyGive(s_worker);
@@ -1936,6 +1968,15 @@ void wr_reading_stop(bool close) {
     bool queued = true;
     if (s_reading.attached || s_reading.ms >= 1000) queued = report_reading();
     if (close && s_reading.ms >= 1000 && !queued) {
+        portENTER_CRITICAL(&s_lock);
+        memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
+        memcpy(s_deferred_reading.book_id, s_reading.book.id, sizeof(s_deferred_reading.book_id));
+        memcpy(s_deferred_reading.owner, s_reading.owner, sizeof(s_deferred_reading.owner));
+        s_deferred_reading.library = s_reading.library;
+        s_deferred_reading.milliseconds = s_reading.ms;
+        portEXIT_CRITICAL(&s_lock);
+        if (!persist_report_queue())
+            ESP_LOGW("WEREAD", "persist deferred reading failed seconds=%u", s_reading.ms / 1000);
         ESP_LOGW("WEREAD", "report queue full; retaining pending reading seconds=%u",
                  s_reading.ms / 1000);
         s_reading.attached = false;
