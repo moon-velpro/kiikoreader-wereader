@@ -53,6 +53,15 @@ class WeReadCacheLogAnalyzerTest(unittest.TestCase):
         self.assertIn("Package stages:", summary)
         self.assertIn("image-fetch=150 ms", summary)
 
+    def test_store_metrics(self):
+        report = parse_lines([
+            "I WEREAD: cache store metrics flush_ms=20 fsync_ms=30 close_ms=4 validate_ms=50 rename_ms=2 total_ms=120 result=1"
+        ])
+        self.assertEqual(report["store_metrics"]["fsync_ms"], 30)
+        self.assertEqual(report["store_metrics"]["total_ms"], 120)
+        self.assertTrue(report["store_metrics"]["result"])
+        self.assertIn("SD/store:", render_text(report))
+
     def test_failed_chapter_is_counted(self):
         report = parse_lines([
             "W WEREAD: cache fetch index=3 bytes=0 elapsed_ms=2000 result=0",
