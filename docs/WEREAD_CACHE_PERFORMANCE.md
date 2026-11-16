@@ -4,7 +4,7 @@
 
 This branch is based on the repository's current `main`, not on the separately reported 81.5 s working-tree snapshot. The current repository source does not contain the reported chapter-TAR path, HTTP host pool, or chapter prefetch implementation. Do not interpret the 81.5 s measurements as measurements of this branch.
 
-This change first adds observational timing around the existing sequential cache path. It does not change HTTP ordering, concurrency, retry policy, Wi-Fi buffers, or panel waveforms.
+This PR now includes small, isolated changes on top of the older sequential cache source: streaming Reader gzip, exact-URL image entry reuse within a single EPUB, and 5% cache-progress redraw coalescing. It does not add concurrent TLS sockets, change retry policy or radio buffers, or change panel waveforms. These changes are **not** a port of the missing 81.5-second pipeline.
 
 ## Timing added
 
@@ -16,6 +16,24 @@ This change first adds observational timing around the existing sequential cache
 - a per-book summary.
 
 Image time is reported separately because it is nested inside the EPUB transform interval. Do not add fetch + transform + image: image is a subset of transform. The metrics are intended to identify the true critical path before scheduling changes.
+
+## Implemented on this experimental branch
+
+- **Reader response gzip**: only the streaming Reader fields request advertises gzip. The response decoder detects the 1F 8B header, uses zlib inflate with an allocator directed to PSRAM, and emits at most 2 KiB per callback. Identity responses continue to work unchanged. Truncated gzip, corrupt gzip, and decompression beyond 8 MiB fail cleanly. Full-response image / JSON requests retain identity encoding.
+- **Successful-image deduplication**: during one EPUB build, an identical normalized source URL reuses its prior ZIP entry name without another HTTPS download. Exact equality avoids collisions; this is a bounded best-effort cache of at most 48 URLs, and all URL copies are released at book completion/cancellation. It does not solve relative TAR paths or change CDN restrictions.
+- **Cache-only 5% redraw coalescing**: avoids a full redraw for every chapter and reserves the final completion frame for the status transition. Other WeRead job types still redraw on progress changes. This does **not** yet turn on partial DU.
+
+Host tests run with sanitizers:
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -Imain/book main/book/weread_body_decode.c tools/weread_body_decode_host_test.c \
+  -lz -o /tmp/weread-decode && /tmp/weread-decode
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -Imain/apps tools/weread_progress_host_test.c \
+  -o /tmp/weread-progress && /tmp/weread-progress
+```
+
+No S31 firmware build or physical hardware benchmark is reported as passing at the time of writing.
 
 ## Open-source optimization leads
 
@@ -58,7 +76,7 @@ ESP-IDF lwIP guidance recommends changing one parameter at a time, considering T
 
 ## Acceptance gates
 
-- No change to default radio settings in this instrumentation patch.
+- No change to default radio settings, TLS concurrency, or CDN allowlist in this patch.
 - Same chapter count, chapter order, image count, and valid EPUB output.
 - No increased failed-cache rate over repeated runs.
 - No watchdog/UNDERRUN regressions.
