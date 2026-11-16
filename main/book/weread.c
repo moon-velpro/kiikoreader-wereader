@@ -991,11 +991,16 @@ static bool renew_session(void) {
         ESP_LOGW("WEREAD", "session renewal rejected");
         return false;
     }
-    char token[sizeof(s_http_account.token)];
-    if (s_http_account.token[0] && session_cookie_copy("wr_skey", token, sizeof(token)) &&
-        strcmp(s_http_account.token, token)) {
-        memcpy(s_http_account.token, token, sizeof(s_http_account.token));
-        (void)save_account(&s_http_account);
+    /* Report-worker renewals run outside run_work(), where s_http_account is
+     * intentionally cleared. Reload the account snapshot so a rotated skey is
+     * persisted there too, not only in the cookie blob. */
+    wr_account_t updated = s_http_account;
+    if (!updated.owner[0]) (void)read_account(&updated);
+    char token[sizeof(updated.token)];
+    if (updated.owner[0] && session_cookie_copy("wr_skey", token, sizeof(token)) &&
+        strcmp(updated.token, token)) {
+        snprintf(updated.token, sizeof(updated.token), "%s", token);
+        if (save_account(&updated)) s_http_account = updated;
     }
     s_expired = false;
     ESP_LOGI("WEREAD", "session renewal confirmed refresh_cookie=%d", session_cookie_has("wr_rt"));
