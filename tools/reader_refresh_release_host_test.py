@@ -117,6 +117,7 @@ unit+='\n'.join(line for line in (root/'main/ui/ui_reader_layout.h').read_text()
 for name in ('reader_area','reader_fullscreen_progress_area','progress_rect'):
  unit+=function(name,root/'main/apps/app_book.c')+'\n'
 unit+='static enum EpdDrawError reader_present_crop(void *hl,const int *wave,int mode,EpdRect area,bool full){return full?update_display_area_full_with(hl,wave,mode,area):update_display_area_diff_with(hl,wave,mode,area); }\n'
+unit+=function('reader_text_effect_present',book_source)+'\n'
 unit+=function('present_book_frame',book_source)+'\n'
 unit+=function('present',book_source)
 
