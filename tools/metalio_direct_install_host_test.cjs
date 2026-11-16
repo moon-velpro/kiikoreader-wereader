@@ -4,6 +4,10 @@
  */
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'..');
+if(!fs.existsSync(path.join(root,'flash'))){
+ console.log('SKIP: staged public flash bundle is absent from this host-test source view');
+ process.exit(0);
+}
 const core=fs.readFileSync(path.join(root,'flash/metalio-flash-core.js'),'utf8').replace(/export /g,'');
 const installer=fs.readFileSync(path.join(root,'flash/metalio-installer.js'),'utf8').replace(/^import .*;\n/gm,'').replace(/await import\('[^']*esptool-js[^']*'\)/g,'await Promise.resolve({ESPLoader:FakeLoader})').replace(/await import\('[^']*metalio-transport[^']*'\)/g,'await Promise.resolve({S31Transport:FakeTransport})');
 function table(){
