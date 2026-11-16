@@ -6,7 +6,7 @@
 #include <zlib.h>
 #include "../main/book/weread_body_decode.h"
 
-typedef struct { char data[16000]; size_t length; bool stop; } sink_t;
+typedef struct { char data[40000]; size_t length; bool stop; } sink_t;
 
 static bool sink(const char *data, size_t n, void *user) {
     sink_t *s = user;
@@ -78,6 +78,19 @@ int main(void) {
     wr_body_decoder_init(&d, sink, &s, 10000, NULL, NULL);
     const unsigned char malformed[] = {0x1f, 0x8b, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     assert(wr_body_decoder_feed(&d, malformed, sizeof(malformed)) == -1);
+    wr_body_decoder_close(&d);
+
+    char large_page[16384];
+    memset(large_page, 'A', sizeof(large_page));
+    size_t large_bytes = make_gzip(large_page, sizeof(large_page), packed, sizeof(packed));
+    memset(&s, 0, sizeof(s));
+    wr_body_decoder_init(&d, sink, &s, 20000, NULL, NULL);
+    for (size_t i = 0; i < large_bytes; i += 13) {
+        size_t take = (large_bytes - i) < 13 ? large_bytes - i : 13;
+        assert(wr_body_decoder_feed(&d, packed + i, take) == 0);
+    }
+    assert(wr_body_decoder_finish(&d) == 0);
+    assert(s.length == sizeof(large_page) && !memcmp(s.data, large_page, s.length));
     wr_body_decoder_close(&d);
 
     puts("PASS: identity/gzip, byte boundaries, truncated, oversized, malformed, early stop");
