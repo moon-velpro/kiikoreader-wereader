@@ -3,10 +3,10 @@
 #include <stdint.h>
 #include <string.h>
 
-static bool tar_size(const unsigned char *field, size_t *size) {
+static bool tar_octal(const unsigned char *field, size_t length, size_t *value) {
     size_t n = 0;
     bool digit = false, ended = false;
-    for (unsigned i = 0; i < 12; ++i) {
+    for (size_t i = 0; i < length; ++i) {
         unsigned char c = field[i];
         if (c == 0 || c == ' ') {
             if (digit) ended = true;
@@ -17,8 +17,17 @@ static bool tar_size(const unsigned char *field, size_t *size) {
         digit = true;
     }
     if (!digit) return false;
-    *size = n;
+    *value = n;
     return true;
+}
+
+static bool tar_header_valid(const unsigned char *header) {
+    size_t expected = 0;
+    if (!tar_octal(header + 148, 8, &expected)) return false;
+    size_t sum = 0;
+    for (size_t i = 0; i < 512; ++i)
+        sum += (i >= 148 && i < 156) ? (unsigned char)' ' : header[i];
+    return sum == expected;
 }
 
 bool wr_tar_find_image(const void *archive, size_t bytes,
@@ -40,9 +49,11 @@ bool wr_tar_find_image(const void *archive, size_t bytes,
         for (unsigned i = 0; i < 512; ++i) if (head[i]) { zero = false; break; }
         if (zero) break;
         size_t size = 0;
-        if (!tar_size(head + 124, &size) || size > bytes - off - 512) return false;
+        if (!tar_header_valid(head) ||
+            !tar_octal(head + 124, 12, &size) ||
+            size > bytes - off - 512 || size > SIZE_MAX - 511) return false;
         size_t padded = (size + 511) & ~(size_t)511;
-        if (padded < size || padded > bytes - off - 512) return false;
+        if (padded > bytes - off - 512) return false;
         size_t nl = 0;
         while (nl < 100 && head[nl]) ++nl;
         const unsigned char *basename = head;
