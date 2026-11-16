@@ -1,7 +1,76 @@
 #include "weread_tar.h"
 
 #include <stdint.h>
+#include <ctype.h>
 #include <string.h>
+#include <strings.h>
+
+static const char *tar_tag_end(const char *start) {
+    char quote = 0;
+    for (const char *p = start; *p; ++p) {
+        if (quote) { if (*p == quote) quote = 0; }
+        else if (*p == '\'' || *p == '"') quote = *p;
+        else if (*p == '>') return p;
+    }
+    return NULL;
+}
+
+static const char *tar_image_src(const char *p, const char *end, size_t *length) {
+    while (p < end) {
+        while (p < end && isspace((unsigned char)*p)) ++p;
+        const char *key = p;
+        while (p < end && !strchr("= \r\n\t", *p)) ++p;
+        size_t key_size = (size_t)(p - key);
+        while (p < end && isspace((unsigned char)*p)) ++p;
+        if (p == end || *p != '=') continue;
+        do { ++p; } while (p < end && isspace((unsigned char)*p));
+        if (p == end) break;
+        char quote = (*p == '"' || *p == '\'') ? *p++ : 0;
+        const char *value = p;
+        while (p < end && (quote ? *p != quote : !isspace((unsigned char)*p))) ++p;
+        if ((key_size == 3 && !strncasecmp(key, "src", 3)) ||
+            (key_size == 9 && !strncasecmp(key, "xlink:href", 9))) {
+            *length = (size_t)(p - value);
+            return value;
+        }
+        if (quote && p < end) ++p;
+    }
+    return NULL;
+}
+
+static bool tar_image_url(const char *src, size_t length) {
+    static const char *const prefixes[] = {
+        "https://res.weread.qq.com/wrepub/",
+        "http://res.weread.qq.com/wrepub/",
+        "//res.weread.qq.com/wrepub/"
+    };
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
+        size_t n = strlen(prefixes[i]);
+        if (length >= n && !strncasecmp(src, prefixes[i], n)) return true;
+    }
+    return false;
+}
+
+bool wr_tar_chapter_has_images(const char *xhtml) {
+    if (!xhtml) return false;
+    const char *limit = xhtml + strlen(xhtml);
+    for (const char *p = xhtml; p < limit;) {
+        if (*p != '<') { ++p; continue; }
+        size_t remaining = (size_t)(limit - p);
+        bool image = remaining >= 4 && !strncasecmp(p, "<img", 4) &&
+                     (p[4] == '>' || isspace((unsigned char)p[4]));
+        bool svg_image = remaining >= 6 && !strncasecmp(p, "<image", 6) &&
+                         isspace((unsigned char)p[6]);
+        if (!image && !svg_image) { ++p; continue; }
+        const char *end = tar_tag_end(p);
+        if (!end) return false;
+        size_t length = 0;
+        const char *src = tar_image_src(p + (image ? 4 : 6), end, &length);
+        if (src && tar_image_url(src, length)) return true;
+        p = end + 1;
+    }
+    return false;
+}
 
 static bool tar_octal(const unsigned char *field, size_t length, size_t *value) {
     size_t n = 0;
