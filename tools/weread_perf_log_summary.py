@@ -14,12 +14,14 @@ PREFIXES = {
     "tar": "cache chapter tar ",
     "keepalive": "cache shard keep-alive ",
     "chapter": "cache chapter book=",
+    "work": "work done ",
 }
 NUMBER_FIELDS = {
     "chapters", "fetch_ms", "transform_ms", "image_ms", "chapter_wall_ms",
     "hits", "wait_ms", "enabled", "stored", "tar_images", "tar_fallbacks",
     "index", "bytes", "limit", "free_psram", "elapsed_ms", "ok",
-    "fallbacks", "disabled", "html_bytes", "result",
+    "fallbacks", "disabled", "html_bytes", "result", "kind", "canceled",
+    "stack_hwm", "internal_free", "psram_free",
 }
 
 
@@ -47,6 +49,7 @@ def summarize(path: Path) -> dict:
         "tar": [],
         "keepalive": [],
         "chapters": [],
+        "work": [],
     }
     text = path.read_text(encoding="utf-8", errors="replace")
     for line in text.splitlines():
@@ -90,6 +93,10 @@ def print_report(report: dict) -> None:
     for p in report["keepalive"]:
         print(f"Shard Keep-Alive: hits={p.get('hits')} | fallbacks={p.get('fallbacks')} | "
               f"disabled={p.get('disabled')}")
+    for p in report["work"]:
+        print(f"End-to-end: ok={p.get('ok')} | canceled={p.get('canceled')} | "
+              f"elapsed={p.get('elapsed_ms')} ms | stack_hwm={p.get('stack_hwm')} | "
+              f"internal_free={p.get('internal_free')} | psram_free={p.get('psram_free')}")
     if report["chapters"]:
         slow = sorted(report["chapters"], key=lambda x: x.get("elapsed_ms", 0), reverse=True)[:5]
         print("Slowest chapters:")
