@@ -13,7 +13,7 @@ PREFIXES = {
     "images": "cache image reuse ",
     "tar": "cache chapter tar ",
     "keepalive": "cache shard keep-alive ",
-    "chapter": "cache chapter book=",
+    "chapters": "cache chapter book=",
     "work": "work done ",
 }
 NUMBER_FIELDS = {
