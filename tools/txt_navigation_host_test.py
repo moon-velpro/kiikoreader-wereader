@@ -240,9 +240,10 @@ with tempfile.TemporaryDirectory(prefix='kiiko-txt-nav-') as folder:
         assert hashlib.sha256(source.read_bytes()).hexdigest()==digest
     header=(ROOT/'main/book/book_epub.h').read_text()
     stubs=[]
-    for m in re.finditer(r'^(?:const char\s*\*|size_t|uint32_t|uint16_t|bool|void|int|esp_err_t)\s*book_epub_\w+\([^;]*\);',header,re.M):
+    for m in re.finditer(r'^(?:const char\s*\*|size_t|uint32_t|bool|void|int|esp_err_t)\s*book_epub_\w+\([^;]*\);',header,re.M):
         proto=m.group()[:-1];ret=proto.split('book_epub_')[0].strip()
         stubs.append(proto+' {'+('' if ret=='void' else 'return 0;')+'}')
+    stubs.append('uint16_t book_epub_cached_chapter_count(const char *path,uint32_t size,int64_t modified) { return 0; }')
     c=t/'test.c';c.write_text(UNIT+'\n'+'\n'.join(stubs))
     manifest=t/'manifest';manifest.write_text(''.join(f'{p} {e}\n' for p,e in rows))
     exe=t/'test'
