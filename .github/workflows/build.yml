@@ -47,6 +47,11 @@ jobs:
             main/book/weread_body_decode.c tools/weread_shard_stream_host_test.c -lz \
             -o "$RUNNER_TEMP/weread-shard-host"
           "$RUNNER_TEMP/weread-shard-host"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_zip_stream.c tools/weread_zip_stream_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-zip-host"
+          "$RUNNER_TEMP/weread-zip-host" "$RUNNER_TEMP/weread-stream.zip"
+          python3 tools/weread_zip_stream_validate.py "$RUNNER_TEMP/weread-stream.zip"
           cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/apps \
             tools/weread_progress_host_test.c -o "$RUNNER_TEMP/weread-progress-host"
           "$RUNNER_TEMP/weread-progress-host"
