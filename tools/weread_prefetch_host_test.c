@@ -60,7 +60,7 @@ static void *fetch(void *ctx, unsigned ch, size_t *size, bool *plain) {
 }
 int main(void) {
     wr_prefetch_t state;
-    assert(wr_prefetch_begin(&state, fetch, NULL));
+    assert(wr_prefetch_begin(&state, fetch, free, NULL));
     for (unsigned i = 0; i < 32; ++i) {
         assert(wr_prefetch_arm(&state, i));
         assert(!wr_prefetch_arm(&state, i+1));
