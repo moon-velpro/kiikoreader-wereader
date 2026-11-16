@@ -4,7 +4,7 @@
 
 This branch is based on the repository's current `main`, not on the separately reported 81.5 s working-tree snapshot. The current repository source does not contain the reported chapter-TAR path, HTTP host pool, or chapter prefetch implementation. Do not interpret the 81.5 s measurements as measurements of this branch.
 
-This PR now includes small, isolated changes on top of the older sequential cache source: streaming Reader gzip, exact-URL image entry reuse within a single EPUB, and 5% cache-progress redraw coalescing. It does not add concurrent TLS sockets, change retry policy or radio buffers, or change panel waveforms. These changes are **not** a port of the missing 81.5-second pipeline.
+This PR builds an experimental high-performance pipeline on top of the older sequential cache source: Reader/shard gzip, shard Keep-Alive, bounded one-worker chapter prefetch, single-pass ZIP writing, image deduplication and progress redraw coalescing. It does not add concurrently active TLS sockets, change radio buffers or change panel waveforms. These changes are **not** a port of the missing 81.5-second TAR pipeline.
 
 ## Timing added
 
@@ -35,6 +35,21 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
 ```
 
 No S31 firmware build or physical hardware benchmark is reported as passing at the time of writing.
+
+## Aggressive pipeline additions
+
+- **Cache-only POST shard Keep-Alive:** the existing `esp_http_client_perform()` reusable-handle path now handles `/web/book/chapter/` POST shards. A non-200 response, transport failure, or invalid gzip trips a **per-job circuit breaker**, drops the handle, and falls back to the older `open/fetch/read` code for the same request. Auth failures/cancel are not blindly replayed. Counters track fast hits and fallbacks.
+- **Bounded one-worker prefetch:** after downloading chapter i, a PSRAM-stack task begins fetching chapter i+1 while the original worker converts/writes chapter i. The request path is guarded with one mutex so only **one TLS operation** is active at a time. One ready chapter slot, 6 MiB free-PSRAM minimum, automatic serial fallback, and explicit task shutdown are required. This targets CPU/network/SD overlap; it is not multi-TLS transfer.
+- **Deferred cookie persistence:** cache HTTP response cookies stay updated in RAM; NVS persistence is deferred until the internal-stack cache work task finishes, so the PSRAM-stack worker never writes NVS directly.
+- **Single-pass stored ZIP entries:** chapter XHTML, OPF, and nav staging files are appended to EPUB as stored ZIP members through a bounded 8 KiB scratch buffer with a signed data descriptor. The file is read once for CRC+write; no full-file PSRAM copy is needed. EPUB mimetype remains the original first stored entry.
+- **Independent test job:** `weread-cache-host-tests` is isolated from unrelated existing repository host/board test failures. ZIP entries are cross-checked with Python `zipfile`; FreeRTOS task sequencing is tested with a pthread host shim and ASan/UBSan.
+
+### Known verification constraints
+
+- Existing unrelated `display-host-tests` fails before new tests because the repository license manifest does not list `licenses/LICENSE-CrossMux.txt`.
+- Existing `board-reader-tests` fails at `txt_navigation_host_test.py` due to unresolved `book_index_cache_prepare_file` and `book_epub_cached_chapter_count` host symbols.
+- The S31 full firmware build and physical device validation must be reviewed independently. These unrelated job failures do not establish a WeRead regression, but a passing host job alone does not establish firmware compatibility.
+- The active branch is **not** the previously reported 81.5-second TAR/prefetch source. No new wall-clock claims should be made without same-book device runs.
 
 ## Open-source optimization leads
 
