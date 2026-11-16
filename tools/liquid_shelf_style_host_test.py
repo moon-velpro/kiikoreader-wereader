@@ -109,8 +109,8 @@ for name in ('shelf_style_slots','shelf_slot_rect','shelf_slot_cover','shelf_row
 unit += catalog + '\n' + count + '\n' + function('draw_style_thumbnail', source) + '\n'
 unit += 'static void paint(uint8_t *fb){' + render + '}\n'
 unit += function('scroll_gesture', source) + '\n'
-unit += 'static app_redraw_t scroll_event(const ui_gesture_event_t *ev){' + scroll + 'return APP_REDRAW_NONE;}\n'
-unit += 'static app_redraw_t tap(int x,int y){app_ctx_t ctx={0};ui_gesture_event_t e={.type=UI_GESTURE_TAP,.x0=x,.y0=y};const ui_gesture_event_t *ev=&e;' + choose + 'return APP_REDRAW_NONE;}\n'
+unit += 'static app_redraw_t scroll_event(const ui_gesture_event_t *ev){app_ctx_t ctx_storage={0};app_ctx_t *ctx=&ctx_storage;' + scroll + 'return APP_REDRAW_NONE;}\n'
+unit += 'static app_redraw_t tap(int x,int y){app_ctx_t ctx_storage={0};app_ctx_t *ctx=&ctx_storage;ui_gesture_event_t e={.type=UI_GESTURE_TAP,.x0=x,.y0=y};const ui_gesture_event_t *ev=&e;' + choose + 'return APP_REDRAW_NONE;}\n'
 unit += r'''
 int main(void){
  const int expected[]={1,2,6,5};uint8_t fb=0;
