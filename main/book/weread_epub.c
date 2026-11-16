@@ -51,7 +51,6 @@ typedef struct {
 
 static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain);
 static void cache_prefetch_release(void *result);
-static bool weread_tar_image_url(const char *src, size_t length);
 
 static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chapter,
                                  bool *plain, size_t *size, unsigned index) {
@@ -219,7 +218,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     int64_t image_started = esp_timer_get_time();
     size_t length = 0;
     const void *borrowed = NULL;
-    bool tar_candidate = weread_tar_image_url(url, strlen(url));
+    bool tar_candidate = wr_tar_image_url(url, strlen(url));
     bool from_tar = s_active_tar && tar_candidate &&
                     wr_tar_find_image(s_active_tar, s_active_tar_bytes,
                                       url, strlen(url), &borrowed, &length);
@@ -376,7 +375,7 @@ static bool rewrite_chapter(FILE *output, FILE *opf, epub_writer_t *zip, const c
         }
     } else {
         const char *p = strcasestr(data, "<body");
-        if (p) { p = tag_end(p); if (p) ++p; }
+        if (p) { p = wr_tar_tag_end(p); if (p) ++p; }
         if (!p) p = data;
         unsigned offset = utf16_at(data,p-data);
         while (*p && !wr_cancelled()) {
@@ -384,10 +383,10 @@ static bool rewrite_chapter(FILE *output, FILE *opf, epub_writer_t *zip, const c
             bool image = !strncasecmp(p,"<img",4) && (isspace((unsigned char)p[4]) || p[4] == '>');
             bool svg = !strncasecmp(p,"<image",6) && isspace((unsigned char)p[6]);
             if (image || svg) {
-                const char *end = tag_end(p);
+                const char *end = wr_tar_tag_end(p);
                 if (!end) return false;
                 size_t length;
-                const char *src = image_src(p+(image?4:6), end, &length);
+                const char *src = wr_tar_image_src(p+(image?4:6), end, &length);
                 char name[40];
                 if (src && gif_source(src, length)) {
                     offset += utf16_at(p,end+1-p);
@@ -401,7 +400,7 @@ static bool rewrite_chapter(FILE *output, FILE *opf, epub_writer_t *zip, const c
                 offset += utf16_at(p,end+1-p);
                 p = end+1;
             } else if (*p == '<') {
-                const char *end = tag_end(p);
+                const char *end = wr_tar_tag_end(p);
                 if (!end || fwrite(p,1,end+1-p,output) != (size_t)(end+1-p)) return false;
                 offset += utf16_at(p,end+1-p);
                 p = end+1;
