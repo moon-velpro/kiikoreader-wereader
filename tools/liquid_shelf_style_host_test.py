@@ -93,7 +93,6 @@ unit+='\n'.join(line for line in (root/'main/ui/ui_book_manage_layout.h').read_t
 unit+='static bool s_bulk_grid;\n'
 unit+=r'''
 typedef struct { bool request_return; } app_ctx_t;
-typedef struct { int type,x0,y0,x,y; } ui_gesture_event_t;
 static char s_notice[96];
 static struct { bool tracking; int origin_offset,origin_y; } s_list_drag;
 static app_redraw_t shelf_style_finish(app_ctx_t *ctx){(void)ctx;s_page=SETTINGS_MAIN;return APP_REDRAW_PAGE;}
@@ -101,7 +100,7 @@ static bool settings_drag_gesture(app_ctx_t *ctx,const ui_gesture_event_t *ev,in
     (void)ctx;(void)ev;(void)offset;(void)limit;*redraw=APP_REDRAW_NONE;return false;
 }
 '''
-for name in ('shelf_rows','row_rect','shelf_cover_image','shelf_style_slots','shelf_slot_rect','shelf_slot_cover'):
+for name in ('shelf_style_slots','shelf_slot_rect','shelf_slot_cover','shelf_rows','row_rect','shelf_cover_image'):
     try:
         unit += function(name,root/'main/apps/app_book.c')+'\n'
     except AssertionError:
@@ -111,7 +110,7 @@ unit += catalog + '\n' + count + '\n' + function('draw_style_thumbnail', source)
 unit += 'static void paint(uint8_t *fb){' + render + '}\n'
 unit += function('scroll_gesture', source) + '\n'
 unit += 'static app_redraw_t scroll_event(const ui_gesture_event_t *ev){' + scroll + 'return APP_REDRAW_NONE;}\n'
-unit += 'static app_redraw_t tap(int x,int y){ui_gesture_event_t e={.type=UI_GESTURE_TAP,.x0=x,.y0=y};const ui_gesture_event_t *ev=&e;' + choose + 'return APP_REDRAW_NONE;}\n'
+unit += 'static app_redraw_t tap(int x,int y){app_ctx_t ctx={0};ui_gesture_event_t e={.type=UI_GESTURE_TAP,.x0=x,.y0=y};const ui_gesture_event_t *ev=&e;' + choose + 'return APP_REDRAW_NONE;}\n'
 unit += r'''
 int main(void){
  const int expected[]={1,2,6,5};uint8_t fb=0;
