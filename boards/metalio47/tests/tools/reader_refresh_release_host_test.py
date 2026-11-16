@@ -121,6 +121,7 @@ for name in ('reader_area','reader_fullscreen_progress_area','progress_rect'):
 unit+='static enum EpdDrawError reader_present_crop(void *hl,const EpdWaveform *wave,int mode,EpdRect area,bool full){return full?update_display_area_full_with(hl,wave,mode,area):update_display_area_diff_with(hl,wave,mode,area); }\n'
 unit+=function('reader_soft_present',root/'main/apps/app_book.c')+'\n'
 unit+=function('reader_image_present',root/'main/apps/app_book.c')+'\n'
+unit+=function('reader_text_effect_present',root/'main/apps/app_book.c')+'\\n'
 unit+=function('present_book_frame',root/'main/apps/app_book.c')+'\\n'
 unit+=function('present',root/'main/apps/app_book.c')
 unit+=r'''
