@@ -1041,8 +1041,9 @@ cleanup:
     esp_http_client_cleanup(http);
     free(request);
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
-        *fields_received = true;
-        ESP_LOGI("WEREAD", "reader HTML bytes=%u full_response=%d", (unsigned)used, complete);
+        /* Completion alone does not mean the reader fields were found. */
+        ESP_LOGI("WEREAD", "reader HTML bytes=%u full_response=%d fields=%d",
+                 (unsigned)used, complete, *fields_received);
         free(data);
         return NULL;
     }
