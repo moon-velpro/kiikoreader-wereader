@@ -62,6 +62,7 @@ static enum EpdDrawError push_area(int tag,const int *wave,int mode,EpdRect area
  assert(calls<8);areas[calls]=area;modes[calls]=mode;waves[calls]=wave;return push(tag);
 }
 static bool reader_status_visible(void){return !s_reader_fullscreen;}
+static void wr_reading_display(bool enabled){(void)enabled;}
 static int64_t ui_nav_clock_minute(void){return 123;}
 static int64_t esp_timer_get_time(void){return 1000000;}
 static bool kick_prep(void){return false;}
@@ -112,6 +113,7 @@ unit+='\n'.join(line for line in (root/'main/ui/ui_reader_layout.h').read_text()
 for name in ('reader_area','reader_fullscreen_progress_area','progress_rect'):
  unit+=function(name,root/'main/apps/app_book.c')+'\n'
 unit+='static enum EpdDrawError reader_present_crop(void *hl,const int *wave,int mode,EpdRect area,bool full){return full?update_display_area_full_with(hl,wave,mode,area):update_display_area_diff_with(hl,wave,mode,area); }\n'
+unit+=function('present_book_frame',root/'main/apps/app_book.c')+'\n'
 unit+=function('present',root/'main/apps/app_book.c')
 
 unit+=r"""
