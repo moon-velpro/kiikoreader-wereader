@@ -9,7 +9,7 @@ The experimental pipeline combines Reader/shard gzip, cache-only shard Keep-Aliv
 ## Timing added
 
 `main/book/weread_epub.c` now records:
-- total chapter fetch time (reader + chapter content request path);
+- total chapter fetch time (reader + chapter content + optional chapter TAR request path, including prefetch wait);
 - EPUB rewrite / ZIP entry time;
 - time spent inside remote image requests;
 - per-chapter fetch, transform, image, and wall time;
