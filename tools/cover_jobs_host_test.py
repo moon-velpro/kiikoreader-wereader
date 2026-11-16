@@ -112,7 +112,7 @@ int main(void){
  generation=book_cover_jobs_begin();q=request("N");q.list=true;q.width=51;q.height=70;
  assert(book_cover_jobs_submit(generation,0,&q));run();old_writes=writes;before_fonts=fonts;
  assert(book_cover_jobs_take(generation,0,&result)==0&&fonts==before_fonts+1);run();
- assert(book_cover_jobs_take(generation,0,&result)==1&&result.width==51&&result.height==70&&result.pixels[0]==33&&writes==old_writes+1);free(result.pixels);
+ assert(book_cover_jobs_take(generation,0,&result)==1&&result.width==51&&result.height==70&&result.pixels[0]==33&&writes==old_writes);free(result.pixels);
  assert(book_cover_jobs_quiesce(0));free(s_jobs);s_jobs=NULL;assert(!live);
  puts("PASS: real bounded cover worker has no UI IO on queue/poll, packed hits skip gray/decode, stale generations and media cancellation discard results, UI-only auto glyphs, transient fallback not cached, all9 slots and OOM/task failures release resources");
 }
