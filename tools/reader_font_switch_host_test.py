@@ -53,6 +53,10 @@ static bool ttf_font_path_is_builtin(const char *p){return !p||!*p||!strcmp(p,"b
 static void save_progress(void){assert(!locked);++progress_saves;}
 static void free_book(void){assert(locked);freed=true;s_text=NULL;}
 static int64_t esp_timer_get_time(void){return 1000000;}
+static unsigned app_settings_book_weight_fine(void){return 0;}
+static bool app_settings_book_antialias(void){return false;}
+static void ttf_set_stroke_adjust_fine(unsigned value){(void)value;}
+static void ttf_set_antialias(bool enabled){(void)enabled;}
 '''
 unit+='#define FONT_STAGE_PUBLISHED() ((void)0)\n'+FIXTURE
 source=root/'main/apps/app_book.c'
