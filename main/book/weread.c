@@ -616,6 +616,23 @@ static bool wr_url_allowed(const char *url, bool service) {
     return false;
 }
 
+static bool http_body_session_expired(const char *body) {
+    if (!body || body[0] != '{') return false;
+    const char *key = strstr(body, "\"errcode\"");
+    if (!key) key = strstr(body, "\"errCode\"");
+    if (!key) return false;
+    const char *value = strchr(key, ':');
+    if (!value) return false;
+    ++value;
+    while (isspace((unsigned char)*value)) ++value;
+    bool quoted = *value == '"';
+    if (quoted) ++value;
+    if (strncmp(value, "-2012", 5)) return false;
+    value += 5;
+    return quoted ? *value == '"' :
+        (*value == ',' || *value == '}' || isspace((unsigned char)*value));
+}
+
 static void log_rejected_image_url(const char *url) {
     const char *scheme = url ? strstr(url, "://") : NULL;
     const char *host = scheme ? scheme + 3 : (url ? url : "");
@@ -894,6 +911,10 @@ static char *http_request(const char *url, const char *body, const char *referer
 cleanup:
     esp_http_client_cleanup(http);
     free(request);
+    if (chunk && complete && !*fields_received && http_body_session_expired(data)) {
+        s_expired = true;
+        s_error_message = "登录已失效，请重新扫码";
+    }
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
         *fields_received = true;
         ESP_LOGI("WEREAD", "reader HTML bytes=%u full_response=%d", (unsigned)used, complete);
@@ -923,19 +944,31 @@ cleanup:
 static char *http_request_with_session(const char *url, const char *body, const char *referer, size_t limit,
                                         size_t *length, wr_http_chunk_fn chunk, void *context,
                                         bool *fields_received, bool *post_started) {
+    const bool renewal = url && !strcmp(url, "/web/login/renewal");
+    const bool service = url && url[0] == '/' && !renewal;
     char *data = http_request(url, body, referer, limit, length, chunk, context,
                               fields_received, post_started);
+    if (service && data && http_body_session_expired(data)) {
+        free(data);
+        data = NULL;
+        s_expired = true;
+        s_error_message = "登录已失效，请重新扫码";
+    }
     bool streamed = fields_received && *fields_received;
-    if (data || streamed || !url || url[0] != '/' ||
-        !strcmp(url, "/web/login/renewal") || !s_expired || wr_cancelled()) return data;
+    if (data || streamed || !service || !s_expired || wr_cancelled()) return data;
 
-    /* A 401/403 is an explicit rejection, so retrying this POST cannot duplicate
-     * an accepted report. Clear the first attempt marker before the retry. */
+    /* A 401/403 or explicit -2012 response is a confirmed rejection, so retrying
+     * this POST cannot duplicate an accepted report. Clear the first attempt marker. */
     if (post_started) *post_started = false;
     if (fields_received) *fields_received = false;
     if (!renew_session()) return NULL;
-    return http_request(url, body, referer, limit, length, chunk, context,
+    data = http_request(url, body, referer, limit, length, chunk, context,
                         fields_received, post_started);
+    if (service && data && http_body_session_expired(data)) {
+        s_expired = true;
+        s_error_message = "登录已失效，请重新扫码";
+    }
+    return data;
 }
 
 char *wr_http(const char *url, const char *body, const char *referer, size_t limit, size_t *length) {
@@ -1008,21 +1041,17 @@ static bool renew_session(void) {
 }
 
 static cJSON *wr_json_limit(const char *url, const char *body, size_t limit) {
-    for (unsigned attempt = 0; attempt < 2 && !wr_cancelled(); ++attempt) {
-        char *data = wr_http(url, body, NULL, limit, NULL);
-        if (!data) return NULL;
-        // cJSON hooks are global; the other firmware clients can parse concurrently.
-        cJSON *json = cJSON_ParseWithOpts(data, NULL, true);
-        free(data);
-        if (!json) { s_error_message = "书架数据解析失败"; return NULL; }
-        const cJSON *error = cJSON_GetObjectItemCaseSensitive(json, "errcode");
-        if (!error) error = cJSON_GetObjectItemCaseSensitive(json, "errCode");
-        if ((cJSON_IsNumber(error) && error->valueint == -2012) ||
-            (cJSON_IsString(error) && !strcmp(error->valuestring, "-2012"))) s_expired = true;
-        if (attempt == 0 && s_expired && renew_session()) { cJSON_Delete(json); continue; }
-        return json;
-    }
-    return NULL;
+    char *data = wr_http(url, body, NULL, limit, NULL);
+    if (!data) return NULL;
+    // cJSON hooks are global; the other firmware clients can parse concurrently.
+    cJSON *json = cJSON_ParseWithOpts(data, NULL, true);
+    free(data);
+    if (!json) { s_error_message = "书架数据解析失败"; return NULL; }
+    const cJSON *error = cJSON_GetObjectItemCaseSensitive(json, "errcode");
+    if (!error) error = cJSON_GetObjectItemCaseSensitive(json, "errCode");
+    if ((cJSON_IsNumber(error) && error->valueint == -2012) ||
+        (cJSON_IsString(error) && !strcmp(error->valuestring, "-2012"))) s_expired = true;
+    return json;
 }
 
 cJSON *wr_json(const char *url, const char *body) {
