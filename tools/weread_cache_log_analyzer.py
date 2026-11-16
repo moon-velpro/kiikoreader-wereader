@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 HTTP_RE = re.compile(
-    r"HTTP complete url=(\S+) bytes=(\d+) elapsed_ms=(\d+) connection_reused=(\d+)"
+    r"HTTP complete url=(\S+) bytes=(\d+) elapsed_ms=(\d+)(?: connection_reused=(\d+))?"
 )
 WORK_RE = re.compile(
     r"work done kind=(\d+) ok=(\d+) canceled=(\d+) elapsed_ms=(\d+)"
@@ -106,7 +106,7 @@ def parse_lines(lines: list[str]) -> dict:
             row["requests"] += 1
             row["bytes"] += int(byte_count)
             row["elapsed_ms"] += int(elapsed)
-            row["reused"] += int(reused)
+            row["reused"] += int(reused or 0)
             report["http_requests"] += 1
             continue
 
