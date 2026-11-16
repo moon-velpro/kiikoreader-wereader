@@ -101,6 +101,8 @@ typedef struct {
     bool *post_started;
     size_t body_limit, body_used, body_capacity;
     char *body_data;
+    char auth_tail[64];
+    size_t auth_tail_length;
 } wr_http_context_t;
 static StaticSemaphore_t s_cookie_mutex_storage;
 static SemaphoreHandle_t s_cookie_mutex;
@@ -700,21 +702,57 @@ static bool wr_url_allowed(const char *url, bool service) {
     return false;
 }
 
-static bool http_body_session_expired(const char *body) {
-    if (!body || body[0] != '{') return false;
-    const char *key = strstr(body, "\"errcode\"");
-    if (!key) key = strstr(body, "\"errCode\"");
+static const char *find_bytes(const char *data, size_t length,
+                              const char *needle, size_t needle_length) {
+    if (!data || needle_length > length) return NULL;
+    for (size_t i = 0; i + needle_length <= length; ++i)
+        if (!memcmp(data + i, needle, needle_length)) return data + i;
+    return NULL;
+}
+
+static bool http_body_session_expired_n(const char *body, size_t length) {
+    if (!body || !length) return false;
+    const char *end = body + length;
+    const char *key = find_bytes(body, length, "\"errcode\"", 9);
+    const char *alternate = find_bytes(body, length, "\"errCode\"", 9);
+    if (!key || (alternate && alternate < key)) key = alternate;
     if (!key) return false;
-    const char *value = strchr(key, ':');
+    const char *value = memchr(key, ':', (size_t)(end - key));
     if (!value) return false;
     ++value;
-    while (isspace((unsigned char)*value)) ++value;
-    bool quoted = *value == '"';
+    while (value < end && isspace((unsigned char)*value)) ++value;
+    bool quoted = value < end && *value == '"';
     if (quoted) ++value;
-    if (strncmp(value, "-2012", 5)) return false;
+    if ((size_t)(end - value) < 5 || memcmp(value, "-2012", 5)) return false;
     value += 5;
-    return quoted ? *value == '"' :
-        (*value == ',' || *value == '}' || isspace((unsigned char)*value));
+    return quoted ? (value < end && *value == '"') :
+        (value == end || *value == ',' || *value == '}' || isspace((unsigned char)*value));
+}
+
+static bool http_body_session_expired(const char *body) {
+    return body && http_body_session_expired_n(body, strlen(body));
+}
+
+/* The reader-fields path reuses a small buffer for each chunk. Keep a short
+ * tail so an errcode/value split at a transport boundary is still detected. */
+static bool http_body_session_expired_chunk(wr_http_context_t *request,
+                                            const char *data, size_t length) {
+    if (!request || !data || !length) return false;
+    if (http_body_session_expired_n(data, length)) return true;
+
+    char prefix[128];
+    size_t tail = request->auth_tail_length;
+    if (tail > sizeof(prefix) - 1) tail = sizeof(prefix) - 1;
+    size_t take = length;
+    if (take > sizeof(prefix) - tail - 1) take = sizeof(prefix) - tail - 1;
+    memcpy(prefix, request->auth_tail, tail);
+    memcpy(prefix + tail, data, take);
+    if (http_body_session_expired_n(prefix, tail + take)) return true;
+
+    size_t keep = length < sizeof(request->auth_tail) ? length : sizeof(request->auth_tail);
+    memcpy(request->auth_tail, data + length - keep, keep);
+    request->auth_tail_length = keep;
+    return false;
 }
 
 static void log_rejected_image_url(const char *url) {
@@ -964,6 +1002,10 @@ static char *http_request(const char *url, const char *body, const char *referer
             int n = esp_http_client_read(http, data, (int)(remaining < 2048 ? remaining : 2048));
             if (n < 0) { read_failed = true; goto cleanup; }
             used += (size_t)n;
+            if (n > 0 && service && http_body_session_expired_chunk(request, data, (size_t)n)) {
+                s_expired = true;
+                s_error_message = "登录已失效，请重新扫码";
+            }
             if (n && chunk(data, (size_t)n, context)) {
                 *fields_received = true;
                 break;
@@ -993,6 +1035,9 @@ static char *http_request(const char *url, const char *body, const char *referer
         }
     }
 cleanup:
+    ;
+    char final_log_url[256];
+    wr_http_log_target(request->current, final_log_url, sizeof(final_log_url));
     esp_http_client_cleanup(http);
     free(request);
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
@@ -1007,15 +1052,11 @@ cleanup:
         else if (wr_cancelled()) s_error_message = "操作已取消";
         else if (code != 200) { /* Preserve the more specific HTTP/authentication message. */ }
         else s_error_message = "微信读书响应未完整接收";
-        char log_url[256];
-        wr_http_log_target(request->current, log_url, sizeof(log_url));
-        ESP_LOGW("WEREAD", "HTTP read failed url=%s complete=%d bytes=%u", log_url, (int)complete, (unsigned)used);
+        ESP_LOGW("WEREAD", "HTTP read failed url=%s complete=%d bytes=%u", final_log_url, (int)complete, (unsigned)used);
         free(data); return NULL;
     }
     data[used] = 0;
-    char log_url[256];
-    wr_http_log_target(request->current, log_url, sizeof(log_url));
-    ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", log_url, (unsigned)used,
+    ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", final_log_url, (unsigned)used,
              (long long)((esp_timer_get_time()-request_started_us)/1000));
     if (length) *length = used;
     return data;
