@@ -34,7 +34,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -o /tmp/weread-progress && /tmp/weread-progress
 ```
 
-The S31 and Pico firmware builds passed at commit `b17c8a6`, before the later combined chapter+TAR prefetch refactor. Those newer commits still require a fresh firmware build. No physical-device speed benchmark has been run for this branch.
+The S31 and Pico firmware builds passed at commit `5339242`, including the combined chapter-body+TAR prefetch refactor, 16 KiB PSRAM worker stack, and dynamic PSRAM budgets. Later commits only changed benchmark-log tooling/documentation. No physical-device speed benchmark has been run for this branch.
 
 ## Aggressive pipeline additions
 
@@ -49,7 +49,7 @@ The S31 and Pico firmware builds passed at commit `b17c8a6`, before the later co
 
 - Existing unrelated `display-host-tests` fails before new tests because the repository license manifest does not list `licenses/LICENSE-CrossMux.txt`.
 - Existing `board-reader-tests` fails at `txt_navigation_host_test.py` due to unresolved `book_index_cache_prepare_file` and `book_epub_cached_chapter_count` host symbols.
-- S31 and Pico firmware builds passed at `b17c8a6`; the combined body+TAR prefetch refactor is newer and its fresh board builds are pending. Physical-device validation remains outstanding.
+- S31 and Pico firmware builds passed at `5339242`, which includes the combined body+TAR prefetch implementation. Physical-device validation and same-book timing comparison remain outstanding.
 - Existing unrelated host/board test failures do not establish a WeRead regression, but a passing WeRead host job alone does not establish firmware compatibility.
 - The earlier 81.5-second result remains an external measurement. This branch has not reproduced it; no new wall-clock claim should be made without same-book device runs.
 
