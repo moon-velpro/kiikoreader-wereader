@@ -377,11 +377,15 @@ static bool rewrite_chapter(FILE *output, FILE *opf, epub_writer_t *zip, const c
         const char *p = strcasestr(data, "<body");
         if (p) { p = wr_tar_tag_end(p); if (p) ++p; }
         if (!p) p = data;
+        const char *data_end = data + strlen(data);
         unsigned offset = utf16_at(data,p-data);
-        while (*p && !wr_cancelled()) {
-            if (!strncasecmp(p, "</body", 6)) break;
-            bool image = !strncasecmp(p,"<img",4) && (isspace((unsigned char)p[4]) || p[4] == '>');
-            bool svg = !strncasecmp(p,"<image",6) && isspace((unsigned char)p[6]);
+        while (p < data_end && !wr_cancelled()) {
+            size_t remaining = (size_t)(data_end - p);
+            if (remaining >= 6 && !strncasecmp(p, "</body", 6)) break;
+            bool image = remaining >= 4 && !strncasecmp(p,"<img",4) &&
+                         (p[4] == '>' || isspace((unsigned char)p[4]));
+            bool svg = remaining >= 6 && !strncasecmp(p,"<image",6) &&
+                       isspace((unsigned char)p[6]);
             if (image || svg) {
                 const char *end = wr_tar_tag_end(p);
                 if (!end) return false;
