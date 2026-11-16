@@ -721,26 +721,6 @@ static bool wr_expand_write(const char *bytes, size_t n, void *arg) {
     return false;
 }
 
-/* Decode a complete chapter shard. Raw image/API requests still use identity. */
-static char *wr_expand_gzip_body(const char *wire, size_t length, size_t limit, size_t *decoded_length) {
-    wr_body_decoder_t *decoder = heap_caps_malloc(sizeof(*decoder),
-                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!decoder) return NULL;
-    wr_expand_sink_t sink = {.limit = limit};
-    wr_body_decoder_init(decoder, wr_expand_write, &sink, limit, wr_reader_zalloc, wr_reader_zfree);
-    int status = wr_body_decoder_feed(decoder, wire, length);
-    if (status == 0) status = wr_body_decoder_finish(decoder);
-    wr_body_decoder_close(decoder);
-    free(decoder);
-    if (status || sink.failed || !sink.data) {
-        free(sink.data);
-        return NULL;
-    }
-    sink.data[sink.used] = 0;
-    *decoded_length = sink.used;
-    return sink.data;
-}
-
 static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
                           size_t *length, wr_http_chunk_fn chunk, void *context,
                           bool *fields_received, bool *post_started) {
@@ -802,7 +782,9 @@ static char *http_request(const char *url, const char *body, const char *referer
         esp_http_client_set_header(http, "Content-Type", "application/json;charset=UTF-8");
     }
     char *data = NULL;
-    wr_body_decoder_t *reader_decoder = NULL;
+    wr_body_decoder_t *reader_decoder = NULL, *shard_decoder = NULL;
+    char *shard_input = NULL;
+    wr_expand_sink_t shard_sink = {.limit = limit};
     size_t used = 0, capacity = 0;
     int64_t scan_wait_until = 0;
     int64_t reader_deadline = chunk && s_processing_report ? esp_timer_get_time() + 90000000 : 0;
@@ -933,6 +915,55 @@ static char *http_request(const char *url, const char *body, const char *referer
             if (s_processing_report) vTaskDelay(1);
             continue;
         }
+        if (compressed_shard) {
+            /* Never hold both the compressed response and the inflated body in RAM.
+             * The only wire buffer is 2 KiB; validated, bounded decoded bytes
+             * accumulate directly into their final PSRAM allocation. */
+            if (!shard_decoder) {
+                shard_input = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                shard_decoder = heap_caps_malloc(sizeof(*shard_decoder),
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!shard_input || !shard_decoder) { allocation_failed = true; goto cleanup; }
+                wr_body_decoder_init(shard_decoder, wr_expand_write, &shard_sink,
+                                     limit, wr_reader_zalloc, wr_reader_zfree);
+            }
+            size_t remaining = limit - used;
+            if (!remaining) {
+                complete = esp_http_client_is_complete_data_received(http);
+                if (!complete) read_failed = true;
+                break;
+            }
+            int n = esp_http_client_read(http, shard_input,
+                                         (int)(remaining < 2048 ? remaining : 2048));
+            if (n < 0) { read_failed = true; goto cleanup; }
+            used += (size_t)n;
+            if (n) {
+                int decoded = wr_body_decoder_feed(shard_decoder, shard_input, (size_t)n);
+                if (decoded != 0 || shard_sink.failed) {
+                    allocation_failed = shard_sink.failed;
+                    read_failed = !allocation_failed;
+                    goto cleanup;
+                }
+            }
+            if (!n || esp_http_client_is_complete_data_received(http)) {
+                complete = esp_http_client_is_complete_data_received(http);
+                if (complete && wr_body_decoder_finish(shard_decoder) != 0) {
+                    complete = false;
+                    read_failed = true;
+                    goto cleanup;
+                }
+                if (complete && shard_sink.data) {
+                    size_t wire_bytes = used;
+                    data = shard_sink.data;
+                    shard_sink.data = NULL;
+                    used = shard_sink.used;
+                    ESP_LOGI("WEREAD", "chapter shard decoded wire=%u bytes=%u",
+                             (unsigned)wire_bytes, (unsigned)used);
+                }
+                break;
+            }
+            continue;
+        }
         if (used == capacity) {
             if (used == limit) { complete = esp_http_client_is_complete_data_received(http); break; }
             size_t next = capacity ? capacity * 2 : declared ? (size_t)declared : 4096;
@@ -955,6 +986,12 @@ cleanup:
         wr_body_decoder_close(reader_decoder);
         free(reader_decoder);
     }
+    if (shard_decoder) {
+        wr_body_decoder_close(shard_decoder);
+        free(shard_decoder);
+    }
+    free(shard_input);
+    free(shard_sink.data);
     esp_http_client_cleanup(http);
     free(request);
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
@@ -973,21 +1010,6 @@ cleanup:
         free(data); return NULL;
     }
     data[used] = 0;
-    if (compressed_shard && used >= 2 &&
-        (uint8_t)data[0] == 0x1f && (uint8_t)data[1] == 0x8b) {
-        size_t expanded = 0;
-        char *decoded = wr_expand_gzip_body(data, used, limit, &expanded);
-        if (!decoded) {
-            wr_error_set("微信读书章节分片解压失败");
-            free(data);
-            return NULL;
-        }
-        free(data);
-        data = decoded;
-        ESP_LOGI("WEREAD", "shard gzip decoded wire=%u decoded=%u",
-                 (unsigned)used, (unsigned)expanded);
-        used = expanded;
-    }
     ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", url, (unsigned)used,
              (long long)((esp_timer_get_time()-request_started_us)/1000));
     if (length) *length = used;
