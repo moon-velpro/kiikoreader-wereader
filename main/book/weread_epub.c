@@ -41,7 +41,16 @@ typedef struct {
     const wr_chapter_t *chapters;
 } cache_prefetch_input_t;
 
+typedef struct {
+    char *content;
+    size_t content_size;
+    bool plain;
+    char *tar;
+    size_t tar_size;
+} cache_prefetch_result_t;
+
 static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain);
+static void cache_prefetch_release(void *result);
 
 static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chapter,
                                  bool *plain, size_t *size, unsigned index) {
@@ -64,11 +73,6 @@ static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chap
              index + 1, (unsigned)*size,
              (long long)((esp_timer_get_time() - started) / 1000));
     return content;
-}
-
-static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain) {
-    cache_prefetch_input_t *input = arg;
-    return cache_fetch_chapter(input->book, &input->chapters[index], plain, size, index);
 }
 
 static void le16(uint8_t *dest, unsigned value) {
@@ -322,6 +326,56 @@ static bool chapter_has_tar_images(const char *data) {
     return false;
 }
 
+static char *cache_fetch_tar(const wr_book_t *book, const wr_chapter_t *chapter,
+                             const char *content, bool plain, size_t *tar_bytes) {
+    if (tar_bytes) *tar_bytes = 0;
+    if (!chapter->tar[0] || plain || !chapter_has_tar_images(content) || wr_cancelled())
+        return NULL;
+    char tar_url[384], reader_referer[384];
+    const char *src = chapter->tar;
+    int n = !strncmp(src, "//", 2)
+          ? snprintf(tar_url, sizeof(tar_url), "https:%s", src)
+          : !strncmp(src, "http://", 7)
+          ? snprintf(tar_url, sizeof(tar_url), "https:%s", src + 7)
+          : *src == '/'
+          ? snprintf(tar_url, sizeof(tar_url), "https://res.weread.qq.com%s", src)
+          : snprintf(tar_url, sizeof(tar_url), "%s", src);
+    if (n <= 0 || n >= (int)sizeof(tar_url) ||
+        !wr_reader_referer(book->id, chapter->id, reader_referer)) return NULL;
+    int64_t started = esp_timer_get_time();
+    char *data = wr_http(tar_url, NULL, reader_referer, WR_IMG_TAR_LIMIT, tar_bytes);
+    ESP_LOGI("WEREAD", "cache chapter tar index=%u bytes=%u elapsed_ms=%lld ok=%d",
+             chapter->index, (unsigned)(tar_bytes ? *tar_bytes : 0),
+             (long long)((esp_timer_get_time() - started) / 1000), (int)(data != NULL));
+    return data;
+}
+
+static void cache_prefetch_release(void *opaque) {
+    cache_prefetch_result_t *result = opaque;
+    if (!result) return;
+    free(result->content);
+    free(result->tar);
+    free(result);
+}
+
+static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain) {
+    cache_prefetch_input_t *input = arg;
+    cache_prefetch_result_t *result = heap_caps_calloc(1, sizeof(*result),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!result) return NULL;
+    result->content = cache_fetch_chapter(input->book, &input->chapters[index],
+                                          &result->plain, &result->content_size, index);
+    if (!result->content) {
+        free(result);
+        return NULL;
+    }
+    result->tar = cache_fetch_tar(input->book, &input->chapters[index],
+                                  result->content, result->plain, &result->tar_size);
+    if (size) *size = sizeof(*result);
+    if (plain) *plain = result->plain;
+    return result;
+}
+
 static unsigned utf16_at(const char *text, size_t bytes) {
     unsigned count = 0;
     for (size_t i = 0; i < bytes; ++i) {
@@ -539,7 +593,8 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
     bool prefetch_enabled = false;
 #if WR_PREFETCH_CHAPTER
     if (ok && count > 1) {
-        prefetch_enabled = wr_prefetch_begin(&prefetch, cache_prefetch_fetch, &prefetch_input);
+        prefetch_enabled = wr_prefetch_begin(&prefetch, cache_prefetch_fetch,
+                                             cache_prefetch_release, &prefetch_input);
         ESP_LOGI("WEREAD", "cache chapter prefetch enabled=%d psram_free=%u",
                  (int)prefetch_enabled,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -553,17 +608,28 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
     for (unsigned i = 0; ok && i < count && !wr_cancelled(); ++i) {
         int64_t chapter_started = esp_timer_get_time();
         uint64_t image_before_us = s_cache_image_elapsed_us;
-        size_t size = 0;
+        size_t size = 0, tar_bytes = 0;
         bool plain = false;
         int64_t fetch_started = esp_timer_get_time();
-        char *content = NULL;
+        cache_prefetch_result_t *prefetched = NULL;
+        char *content = NULL, *tar_data = NULL;
         if (prefetch_enabled && i) {
-            content = wr_prefetch_take(&prefetch, i, &size, &plain);
+            prefetched = wr_prefetch_take(&prefetch, i, NULL, NULL);
             prefetch_wait_us += (uint64_t)(esp_timer_get_time() - fetch_started);
-            if (content) ++prefetch_hits;
+            if (prefetched) {
+                content = prefetched->content;
+                size = prefetched->content_size;
+                plain = prefetched->plain;
+                tar_data = prefetched->tar;
+                tar_bytes = prefetched->tar_size;
+                ++prefetch_hits;
+            }
         }
-        if (!content && !wr_cancelled())
+        if (!content && !wr_cancelled()) {
             content = cache_fetch_chapter(book, &chapters[i], &plain, &size, i);
+            if (content)
+                tar_data = cache_fetch_tar(book, &chapters[i], content, plain, &tar_bytes);
+        }
         fetch_elapsed_us += (uint64_t)(esp_timer_get_time() - fetch_started);
         if (!content) {
             if (!wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
@@ -575,40 +641,14 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         if (size >= 4 && !memcmp(content, "PK\003\004", 4)) {
             ok = !i && !fseek(target, 0, SEEK_SET) && fwrite(content, 1, size, target) == size &&
                 !fflush(target) && !ftruncate(fileno(target), size);
-            free(content);
+            if (prefetched) cache_prefetch_release(prefetched);
+            else { free(content); free(tar_data); }
             goto cleanup;
         }
-        /* Fetch chapter i+1 on a PSRAM-stack worker while current chapter
-         * conversion and SD writes run. HTTP is gated to one TLS request at a
-         * time, so this is CPU/I/O overlap rather than parallel TLS sockets. */
-        if (prefetch_enabled && i + 1 < count && !wr_cancelled()) {
+        /* The current chapter and its TAR are now both ready. Start fetching
+         * the next chapter plus its TAR while this chapter is rewritten. */
+        if (prefetch_enabled && i + 1 < count && !wr_cancelled())
             (void)wr_prefetch_arm(&prefetch, i + 1);
-        }
-
-        /* The TOC's chapter tar bundles its images. Read it once; the rewrite
-         * path resolves each <img> by basename and falls back to individual
-         * HTTPS images only when a bundle member cannot be identified. */
-        char *tar_data = NULL;
-        size_t tar_bytes = 0;
-        if (chapters[i].tar[0] && !plain && chapter_has_tar_images(content) && !wr_cancelled()) {
-            char tar_url[384], reader_referer[384];
-            const char *src = chapters[i].tar;
-            int n = !strncmp(src, "//", 2)
-                  ? snprintf(tar_url, sizeof(tar_url), "https:%s", src)
-                  : *src == '/'
-                  ? snprintf(tar_url, sizeof(tar_url), "https://res.weread.qq.com%s", src)
-                  : snprintf(tar_url, sizeof(tar_url), "%s", src);
-            if (n > 0 && n < (int)sizeof(tar_url) &&
-                wr_reader_referer(book->id, chapters[i].id, reader_referer)) {
-                int64_t tar_started = esp_timer_get_time();
-                tar_data = wr_http(tar_url, NULL, reader_referer,
-                                   WR_IMG_TAR_LIMIT, &tar_bytes);
-                ESP_LOGI("WEREAD", "cache chapter tar index=%u bytes=%u elapsed_ms=%lld ok=%d",
-                         i + 1, (unsigned)tar_bytes,
-                         (long long)((esp_timer_get_time() - tar_started) / 1000),
-                         (int)(tar_data != NULL));
-            }
-        }
         s_active_tar = tar_data;
         s_active_tar_bytes = tar_bytes;
         int64_t transform_started = esp_timer_get_time();
@@ -624,7 +664,6 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         if (chapter) fclose(chapter);
         s_active_tar = NULL;
         s_active_tar_bytes = 0;
-        free(tar_data);
         uint64_t transform_us = (uint64_t)(esp_timer_get_time() - transform_started);
         transform_elapsed_us += transform_us;
         chapter_elapsed_us += (uint64_t)(esp_timer_get_time() - chapter_started);
@@ -637,7 +676,8 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         if (!ok && !wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
             wr_error_set("缓存失败：章节内容处理或图片下载失败");
         if (!ok) ESP_LOGE("WEREAD","cache package failed book=%s chapter=%u title=%s error=%s",book->id,i,chapters[i].title,wr_error_message());
-        free(content);
+        if (prefetched) cache_prefetch_release(prefetched);
+        else { free(content); free(tar_data); }
         wr_work_progress(i+1, count);
         /* Let idle/UI and watchdog service run between CPU-heavy chapter conversions. */
         vTaskDelay(1);
