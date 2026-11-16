@@ -24,6 +24,16 @@ static void member(unsigned char *dst, const char *name, const unsigned char *da
 }
 
 int main(void) {
+    assert(!wr_tar_chapter_has_images(NULL));
+    assert(!wr_tar_chapter_has_images("<html><body><p>text</p></body></html>"));
+    assert(wr_tar_chapter_has_images("<img src=\"https://res.weread.qq.com/wrepub/a.jpg\"/>"));
+    assert(wr_tar_chapter_has_images("<svg><image xlink:href=\"//res.weread.qq.com/wrepub/a.png\"/></svg>"));
+    assert(!wr_tar_chapter_has_images("<img src=\"https://example.com/a.jpg\"/>"));
+    assert(!wr_tar_chapter_has_images("<im"));
+    assert(!wr_tar_chapter_has_images("<img"));
+    assert(!wr_tar_chapter_has_images("<imag"));
+    assert(!wr_tar_chapter_has_images("<image"));
+    assert(!wr_tar_chapter_has_images("<img src=\"https://res.weread.qq.com/wrepub/a.jpg\""));
     unsigned char tar[3072] = {0};
     const unsigned char jpg[] = {0xff, 0xd8, 0xff, 0xd9};
     const unsigned char png[] = {0x89, 'P', 'N', 'G'};
