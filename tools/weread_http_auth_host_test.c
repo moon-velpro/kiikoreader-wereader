@@ -9,6 +9,9 @@ int main(void) {
     assert(!wr_http_body_session_expired("{\"errcode\":0}"));
     assert(!wr_http_body_session_expired("{\"errcode\":-20120}"));
     assert(!wr_http_body_session_expired("{\"message\":\"errcode -2012\"}"));
+    assert(!wr_http_body_session_expired("{\"message\":\"\\\\\"errcode\\\\\":-2012\"}"));
+    assert(!wr_http_body_session_expired("{\"errcode\" : -2012x}"));
+    assert(wr_http_body_session_expired("{\"data\":{\"errCode\":-2012}}"));
 
     wr_http_auth_scan_t scan = {0};
     const char *first = "{\"errcode\":";
