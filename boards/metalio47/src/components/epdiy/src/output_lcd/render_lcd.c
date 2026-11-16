@@ -179,7 +179,7 @@ void lcd_do_update(RenderContext_t* ctx) {
             extern void epd_lcd_dump_dma(void);
             epd_lcd_dump_dma();
 #endif
-            ESP_LOGW("epd_lcd","UNDERRUN phase=%d prefill=%d first_missing_row=%d reason=%d consumed=%d/%d",
+            ESP_LOGE("epd_lcd","phase=%d prefill=%d first_missing_row=%d reason=%d consumed=%d/%d",
                      k,s_prefill_lines,ctx->underrun_row,ctx->underrun_reason,ctx->lines_consumed,ctx->lines_total);
             for (int i = 0; i < NUM_RENDER_THREADS; i++) {
                 lq_reset(&ctx->line_queues[i]);
