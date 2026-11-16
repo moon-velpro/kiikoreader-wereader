@@ -428,6 +428,10 @@ static wr_chapter_t *get_chapters(const wr_book_t *book, unsigned *count) {
         const cJSON *index = cJSON_GetObjectItemCaseSensitive(entry, "chapterIdx");
         item->index = cJSON_IsNumber(index) && index->valuedouble >= 0 && index->valuedouble <= UINT32_MAX ? (uint32_t)index->valuedouble : *count;
         (void)wr_value(cJSON_GetObjectItemCaseSensitive(entry,"title"), item->title, sizeof(item->title));
+        const cJSON *tar = cJSON_GetObjectItemCaseSensitive(entry, "tar");
+        if (cJSON_IsString(tar) && tar->valuestring &&
+            strlen(tar->valuestring) < sizeof(item->tar))
+            snprintf(item->tar, sizeof(item->tar), "%s", tar->valuestring);
         ++*count;
     }
     cJSON_Delete(toc);
