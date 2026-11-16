@@ -39,6 +39,10 @@ jobs:
           python3 tools/test_s31_dma_chain.py
           python3 tools/test_s31_line_queue.py
           python3 tools/test_s31_radio_margin.py
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain/book \
+            main/book/weread_body_decode.c tools/weread_body_decode_host_test.c -lz \
+            -o "$RUNNER_TEMP/weread-decode-host"
+          "$RUNNER_TEMP/weread-decode-host"
           python3 tools/test_home_minute_present.py
           bash tools/run_metalio_cover_cache_host_test.sh
           python3 tools/board_source_view.py --board metalio47 --tests --output build/host/metalio47
