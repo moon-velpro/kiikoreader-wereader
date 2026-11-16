@@ -1,4 +1,5 @@
 #include "weread_internal.h"
+#include "weread_body_decode.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -678,6 +679,18 @@ static bool report_display_busy(void) {
     return busy;
 }
 
+/* Keep the inflate workspace out of the small internal DMA heap. */
+static voidpf wr_reader_zalloc(voidpf opaque, uInt count, uInt bytes) {
+    (void)opaque;
+    if (!count || bytes > SIZE_MAX / count) return Z_NULL;
+    return heap_caps_malloc((size_t)count * bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void wr_reader_zfree(voidpf opaque, voidpf ptr) {
+    (void)opaque;
+    free(ptr);
+}
+
 static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
                           size_t *length, wr_http_chunk_fn chunk, void *context,
                           bool *fields_received, bool *post_started) {
@@ -725,7 +738,7 @@ static char *http_request(const char *url, const char *body, const char *referer
     };
     esp_http_client_handle_t http = esp_http_client_init(&config);
     if (!http) { s_error_message = "无法创建网络请求"; free(request); return NULL; }
-    esp_http_client_set_header(http, "Accept-Encoding", "identity");
+    esp_http_client_set_header(http, "Accept-Encoding", chunk ? "gzip" : "identity");
     esp_http_client_set_header(http, "Referer", referer ? referer : WR_HOST "/");
     if (service) {
         esp_http_client_set_header(http,"Accept","application/json, text/plain, */*");
@@ -737,6 +750,7 @@ static char *http_request(const char *url, const char *body, const char *referer
         esp_http_client_set_header(http, "Content-Type", "application/json;charset=UTF-8");
     }
     char *data = NULL;
+    wr_body_decoder_t *reader_decoder = NULL;
     size_t used = 0, capacity = 0;
     int64_t scan_wait_until = 0;
     int64_t reader_deadline = chunk && s_processing_report ? esp_timer_get_time() + 90000000 : 0;
@@ -817,6 +831,13 @@ static char *http_request(const char *url, const char *body, const char *referer
     if (declared < 0) declared = 0;
     while (!wr_cancelled()) {
         if (chunk) {
+            if (!reader_decoder) {
+                reader_decoder = heap_caps_malloc(sizeof(*reader_decoder),
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!reader_decoder) { allocation_failed = true; goto cleanup; }
+                wr_body_decoder_init(reader_decoder, chunk, context,
+                                     8 * 1024 * 1024, wr_reader_zalloc, wr_reader_zfree);
+            }
             if (reader_deadline && esp_timer_get_time() >= reader_deadline) {
                 ESP_LOGW("WEREAD", "report reader response deadline bytes=%u", (unsigned)used);
                 goto cleanup;
@@ -840,12 +861,21 @@ static char *http_request(const char *url, const char *body, const char *referer
             int n = esp_http_client_read(http, data, (int)(remaining < 2048 ? remaining : 2048));
             if (n < 0) { read_failed = true; goto cleanup; }
             used += (size_t)n;
-            if (n && chunk(data, (size_t)n, context)) {
-                *fields_received = true;
-                break;
+            if (n) {
+                int decode_status = wr_body_decoder_feed(reader_decoder, data, (size_t)n);
+                if (decode_status < 0) { read_failed = true; goto cleanup; }
+                if (decode_status > 0) {
+                    *fields_received = true;
+                    break;
+                }
             }
             if (!n || esp_http_client_is_complete_data_received(http)) {
                 complete = esp_http_client_is_complete_data_received(http);
+                if (complete) {
+                    int decode_status = wr_body_decoder_finish(reader_decoder);
+                    if (decode_status < 0) { read_failed = true; complete = false; goto cleanup; }
+                    if (decode_status > 0) *fields_received = true;
+                }
                 break;
             }
             if (s_processing_report) vTaskDelay(1);
@@ -869,6 +899,10 @@ static char *http_request(const char *url, const char *body, const char *referer
         }
     }
 cleanup:
+    if (reader_decoder) {
+        wr_body_decoder_close(reader_decoder);
+        free(reader_decoder);
+    }
     esp_http_client_cleanup(http);
     free(request);
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
