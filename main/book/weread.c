@@ -1,4 +1,5 @@
 #include "weread_internal.h"
+#include "weread_http_log.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -120,6 +121,7 @@ static void restore_session_cookie(void);
 static bool wr_url_allowed(const char *url, bool service);
 static bool cover_redirect_url(const char *current, const char *location,
                                char out[WR_HTTP_URL_BYTES]);
+static bool renew_session(void);
 
 const char *wr_error_message(void) { return atomic_load(&s_error_message); }
 void wr_error_set(const char *message) { if (message && *message) atomic_store(&s_error_message, message); }
@@ -500,8 +502,10 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
                 s_http_open_failed = true;
                 wr_error_set("微信读书网络连接失败，请检查 Wi-Fi 后重试");
             } else wr_error_set("读取微信读书响应失败");
+            char log_url[256];
+            wr_http_log_target(request->current, log_url, sizeof(log_url));
             ESP_LOGW("WEREAD", "HTTP perform failed url=%s err=%s tls=%s code=%d flags=0x%x bytes=%u",
-                     url, esp_err_to_name(result), esp_err_to_name(tls_error), tls_code,
+                     log_url, esp_err_to_name(result), esp_err_to_name(tls_error), tls_code,
                      (unsigned)tls_flags, (unsigned)request->body_used);
             free(request->body_data);
             request->body_data = NULL;
@@ -533,7 +537,10 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
                 return NULL;
             }
         }
-        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", url, redirected);
+        char log_from[256], log_to[256];
+        wr_http_log_target(request->current, log_from, sizeof(log_from));
+        wr_http_log_target(redirected, log_to, sizeof(log_to));
+        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", log_from, log_to);
         snprintf(absolute, WR_HTTP_URL_BYTES, "%s", redirected);
         if (code == 301 || code == 302 || code == 303) {
             esp_http_client_set_method(http, HTTP_METHOD_GET);
@@ -556,8 +563,10 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
     }
     request->body_data[request->body_used] = 0;
     if (length) *length = request->body_used;
+    char log_url[256];
+    wr_http_log_target(request->current, log_url, sizeof(log_url));
     ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld connection_reused=%d",
-             request->current, (unsigned)request->body_used,
+             log_url, (unsigned)request->body_used,
              (long long)((esp_timer_get_time() - started) / 1000), reused);
     char *result = request->body_data;
     request->body_data = NULL;
@@ -757,8 +766,10 @@ static char *http_request(const char *url, const char *body, const char *referer
             s_error_message = "微信读书网络连接失败，请检查 Wi-Fi 后重试";
             int tls_code = 0, tls_flags = 0;
             esp_err_t tls_error = esp_http_client_get_and_clear_last_tls_error(http, &tls_code, &tls_flags);
+            char log_url[256];
+            wr_http_log_target(request->current, log_url, sizeof(log_url));
             ESP_LOGW("WEREAD", "HTTP open failed url=%s err=%s ms=%lld tls=%s code=%d flags=0x%x internal=%u largest=%u",
-                     url, esp_err_to_name(open_error), (long long)((esp_timer_get_time()-open_start)/1000),
+                     log_url, esp_err_to_name(open_error), (long long)((esp_timer_get_time()-open_start)/1000),
                      esp_err_to_name(tls_error), tls_code, (unsigned)tls_flags,
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -772,7 +783,9 @@ static char *http_request(const char *url, const char *body, const char *referer
         }
         declared = esp_http_client_fetch_headers(http);
         code = esp_http_client_get_status_code(http);
-        ESP_LOGI("WEREAD", "HTTP %s code=%d declared=%lld chunked=%d", url, code, (long long)declared,
+        char log_url[256];
+        wr_http_log_target(request->current, log_url, sizeof(log_url));
+        ESP_LOGI("WEREAD", "HTTP %s code=%d declared=%lld chunked=%d", log_url, code, (long long)declared,
                  (int)esp_http_client_is_chunked_response(http));
         bool redirect = code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
         char *redirected = request->redirected;
@@ -780,12 +793,17 @@ static char *http_request(const char *url, const char *body, const char *referer
         if (redirects >= 5) { s_error_message="微信读书封面重定向次数过多"; goto cleanup; }
         if (!service) {
             if (!cover_redirect_url(request->current,request->location,redirected)) {
-                ESP_LOGW("WEREAD","cover redirect invalid location='%s'",request->location);
+                char log_location[256];
+                wr_http_log_target(request->location, log_location, sizeof(log_location));
+                ESP_LOGW("WEREAD","cover redirect invalid location='%s'",log_location);
                 s_error_message = "微信读书图片重定向地址不受支持";
                 goto cleanup;
             }
             if (!wr_url_allowed(redirected,false) || esp_http_client_set_url(http,redirected)!=ESP_OK) {
-                ESP_LOGW("WEREAD","cover redirect target rejected location='%s' target='%s'",request->location,redirected);
+                char log_location[256], log_target[256];
+                wr_http_log_target(request->location, log_location, sizeof(log_location));
+                wr_http_log_target(redirected, log_target, sizeof(log_target));
+                ESP_LOGW("WEREAD","cover redirect target rejected location='%s' target='%s'",log_location,log_target);
                 s_error_message = "微信读书图片重定向地址不受支持";
                 goto cleanup;
             }
@@ -797,11 +815,16 @@ static char *http_request(const char *url, const char *body, const char *referer
             }
         }
         if (!wr_url_allowed(redirected, service)) {
-            ESP_LOGW("WEREAD","redirect target rejected service=%d target='%s'",service,redirected);
+            char log_target[256];
+            wr_http_log_target(redirected, log_target, sizeof(log_target));
+            ESP_LOGW("WEREAD","redirect target rejected service=%d target='%s'",service,log_target);
             s_error_message = "微信读书图片重定向地址不受支持";
             goto cleanup;
         }
-        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", url, redirected);
+        char log_from[256], log_to[256];
+        wr_http_log_target(request->current, log_from, sizeof(log_from));
+        wr_http_log_target(redirected, log_to, sizeof(log_to));
+        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", log_from, log_to);
         snprintf(request->current,sizeof(request->current),"%s",redirected);
         if (code == 301 || code == 302 || code == 303) {
             body_size = 0;
@@ -883,28 +906,50 @@ cleanup:
         else if (wr_cancelled()) s_error_message = "操作已取消";
         else if (code != 200) { /* Preserve the more specific HTTP/authentication message. */ }
         else s_error_message = "微信读书响应未完整接收";
-        ESP_LOGW("WEREAD", "HTTP read failed url=%s complete=%d bytes=%u", url, (int)complete, (unsigned)used);
+        char log_url[256];
+        wr_http_log_target(request->current, log_url, sizeof(log_url));
+        ESP_LOGW("WEREAD", "HTTP read failed url=%s complete=%d bytes=%u", log_url, (int)complete, (unsigned)used);
         free(data); return NULL;
     }
     data[used] = 0;
-    ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", url, (unsigned)used,
+    char log_url[256];
+    wr_http_log_target(request->current, log_url, sizeof(log_url));
+    ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", log_url, (unsigned)used,
              (long long)((esp_timer_get_time()-request_started_us)/1000));
     if (length) *length = used;
     return data;
 }
 
+static char *http_request_with_session(const char *url, const char *body, const char *referer, size_t limit,
+                                        size_t *length, wr_http_chunk_fn chunk, void *context,
+                                        bool *fields_received, bool *post_started) {
+    char *data = http_request(url, body, referer, limit, length, chunk, context,
+                              fields_received, post_started);
+    bool streamed = fields_received && *fields_received;
+    if (data || streamed || !url || url[0] != '/' ||
+        !strcmp(url, "/web/login/renewal") || !s_expired || wr_cancelled()) return data;
+
+    /* A 401/403 is an explicit rejection, so retrying this POST cannot duplicate
+     * an accepted report. Clear the first attempt marker before the retry. */
+    if (post_started) *post_started = false;
+    if (fields_received) *fields_received = false;
+    if (!renew_session()) return NULL;
+    return http_request(url, body, referer, limit, length, chunk, context,
+                        fields_received, post_started);
+}
+
 char *wr_http(const char *url, const char *body, const char *referer, size_t limit, size_t *length) {
-    return http_request(url, body, referer, limit, length, NULL, NULL, NULL, NULL);
+    return http_request_with_session(url, body, referer, limit, length, NULL, NULL, NULL, NULL);
 }
 
 bool wr_http_reader_fields(const char *url, size_t limit, wr_http_chunk_fn chunk, void *context) {
     bool received = false;
-    http_request(url, NULL, WR_HOST "/", limit, NULL, chunk, context, &received, NULL);
+    http_request_with_session(url, NULL, WR_HOST "/", limit, NULL, chunk, context, &received, NULL);
     return received;
 }
 
 char *wr_http_report(const char *body, const char *referer, bool *post_started) {
-    return http_request("/web/book/read", body, referer, 16384, NULL, NULL, NULL, NULL, post_started);
+    return http_request_with_session("/web/book/read", body, referer, 16384, NULL, NULL, NULL, NULL, post_started);
 }
 
 static void *json_alloc(size_t size) { return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
@@ -960,10 +1005,7 @@ static bool renew_session(void) {
 static cJSON *wr_json_limit(const char *url, const char *body, size_t limit) {
     for (unsigned attempt = 0; attempt < 2 && !wr_cancelled(); ++attempt) {
         char *data = wr_http(url, body, NULL, limit, NULL);
-        if (!data) {
-            if (attempt == 0 && s_expired && renew_session()) continue;
-            return NULL;
-        }
+        if (!data) return NULL;
         // cJSON hooks are global; the other firmware clients can parse concurrently.
         cJSON *json = cJSON_ParseWithOpts(data, NULL, true);
         free(data);
@@ -1204,7 +1246,11 @@ static void sync_covers(unsigned first, unsigned count) {
                  book.id, (long long)local_ms, (long long)net_ms, (unsigned)length,
                  (long long)decode_ms, (long long)write_ms,
                  (long long)((esp_timer_get_time()-cover_start)/1000), ok);
-        if (!ok) ESP_LOGW("WEREAD","cover unavailable book=%s url=%s error=%s",book.id,book.cover,wr_error_message());
+        if (!ok) {
+            char log_cover[256];
+            wr_http_log_target(book.cover, log_cover, sizeof(log_cover));
+            ESP_LOGW("WEREAD","cover unavailable book=%s url=%s error=%s",book.id,log_cover,wr_error_message());
+        }
         else ++downloaded;
         free(image);
         wr_work_progress(downloaded, count);
