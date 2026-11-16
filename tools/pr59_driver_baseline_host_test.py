@@ -9,7 +9,12 @@ SOURCE=Path(json.loads(marker.read_text())['source']) if marker.exists() else RO
 j=json.loads((SOURCE/'tools/fixtures/pr59-driver-baseline.json').read_text())
 overrides=j.get('approved_overrides',{})
 assert set(overrides)<=set(j['sha256'])
+mismatches=[]
 for name,digest in j['sha256'].items():
     expected=overrides[name]['sha256'] if name in overrides else digest
-    assert hashlib.sha256((SOURCE/name).read_bytes()).hexdigest()==expected,name
+    actual=hashlib.sha256((SOURCE/name).read_bytes()).hexdigest()
+    if actual!=expected:mismatches.append({'path':name,'expected':expected,'actual':actual})
+if mismatches:
+    print('PR59_BASELINE_MISMATCHES='+json.dumps(mismatches,ensure_ascii=False),flush=True)
+    raise AssertionError('PR59 driver baseline mismatch')
 print('PASS:',len(j['sha256'])-len(overrides),'PR59 driver/config/waveform files and',len(overrides),'explicitly approved overrides match')
