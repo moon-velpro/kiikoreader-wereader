@@ -114,6 +114,7 @@ static SemaphoreHandle_t s_cookie_mutex;
 static StaticSemaphore_t s_report_store_mutex_storage;
 static SemaphoreHandle_t s_report_store_mutex;
 static bool s_report_store_dirty;
+static int64_t s_report_store_retry_at;
 static wr_result_t s_result;
 static wr_job_t s_active_job;
 static atomic_bool s_cancel;
@@ -244,7 +245,13 @@ static bool report_store_flush_locked(void) {
     dirty = s_report_store_dirty;
     portEXIT_CRITICAL(&s_lock);
     if (!dirty) return true;
-    if (!persist_report_queue_locked()) return false;
+    const int64_t now = esp_timer_get_time();
+    if (s_report_store_retry_at && now < s_report_store_retry_at) return false;
+    if (!persist_report_queue_locked()) {
+        s_report_store_retry_at = now + 500000;
+        return false;
+    }
+    s_report_store_retry_at = 0;
     portENTER_CRITICAL(&s_lock);
     s_report_store_dirty = false;
     portEXIT_CRITICAL(&s_lock);
@@ -252,6 +259,7 @@ static bool report_store_flush_locked(void) {
 }
 
 static void report_store_set_dirty(bool dirty) {
+    s_report_store_retry_at = dirty ? esp_timer_get_time() + 500000 : 0;
     portENTER_CRITICAL(&s_lock);
     s_report_store_dirty = dirty;
     portEXIT_CRITICAL(&s_lock);
