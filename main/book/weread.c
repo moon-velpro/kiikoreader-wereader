@@ -1614,7 +1614,14 @@ static bool login(void) {
                 // 换账号：旧会话立即失效，避免把旧账号的时长记到新账号。
                 // Account switched: retire the old session so its time can never bill the new one.
                 radio_hold(false);
-                memset(&s_reading, 0, sizeof(s_reading));
+                if (s_reading.ms >= 1000) {
+                    /* Retain the old-account timer until it is durably queued;
+                     * the report worker will then discard it as account-changed. */
+                    s_reading.attached = false;
+                    s_reading.last = 0;
+                } else {
+                    memset(&s_reading, 0, sizeof(s_reading));
+                }
             }
             s_http_account = account;
             return true;
