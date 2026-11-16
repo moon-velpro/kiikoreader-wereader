@@ -718,7 +718,7 @@ static char *http_request_impl(const char *url, const char *body, const char *re
                                              sizeof("https://res.weread.qq.com/wrco/") - 1);
     if (wr_cancelled()) { s_error_message = "操作已取消"; return NULL; }
     if (!wr_online()) { http_keepalive_drop(); s_error_message = "Wi-Fi 未连接或网络尚未就绪"; return NULL; }
-    if (url[0] == '/' || res_archive) restore_session_cookie();
+    if (service) restore_session_cookie(); /* service call restores cookies on the internal-stack worker before TAR prefetch */
     wr_http_context_t *request = heap_caps_calloc(1, sizeof(*request), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!request) { s_error_message = "内存不足，无法创建微信读书请求"; return NULL; }
     /* Reuse a single host-scoped TLS handle across the small e_/t_ POST shards.
