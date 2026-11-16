@@ -27,7 +27,7 @@ bool wr_prefetch_begin(wr_prefetch_t *state, wr_prefetch_fetch_fn fn,
     memset(state, 0, sizeof(*state));
     if (!fn) return false;
 #if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
-    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < 6 * 1024 * 1024) return false;
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < 4 * 1024 * 1024) return false;
     state->fetch = fn;
     state->release = release;
     state->context = context;
