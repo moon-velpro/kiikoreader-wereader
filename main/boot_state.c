@@ -230,11 +230,10 @@ void pico_boot_ready(void) {
      * Corrupt startup records and failed NVS writes remain in recovery.
      */
     if (s_recovery && !(s_recovery_reasons & (BOOT_RECOVERY_RECORD | BOOT_RECOVERY_STORE))) {
-        unsigned reasons = s_recovery_reasons;
+        ESP_LOGW("boot_state", "safe UI ready; releasing global recovery reasons=0x%02x quarantined=%u",
+                 s_recovery_reasons, (unsigned)(s_record.blocked[0] != 0));
         s_recovery = false;
         s_recovery_reasons = 0;
-        ESP_LOGW("boot_state", "safe UI ready; releasing global recovery reasons=0x%02x quarantined=%u",
-                 reasons, (unsigned)(s_record.blocked[0] != 0));
     }
 }
 bool pico_boot_recovery(void) { return s_recovery; }
