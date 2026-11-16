@@ -6,6 +6,8 @@ This branch is based on the repository's current `main`, not on the separately r
 
 The experimental pipeline combines Reader/shard gzip, cache-only shard Keep-Alive with a circuit breaker, one-worker chapter+TAR prefetch, single-pass ZIP writing, image deduplication and partial-DU progress updates. It does not add concurrently active TLS sockets, change radio buffers or change panel waveforms.
 
+**Device acceptance baseline:** use the same 32-chapter book (56 images, 16 chapter resource packs, 15.37 MB total resources). The last user-reported intermediate firmware measured 175.1 s end-to-end. Acceptance for this branch is a same-device, same-AP, same-book run below 175.1 s; the separate 81.5 s working-tree result is a stretch reference, not a verified baseline for this branch.
+
 ## Timing added
 
 `main/book/weread_epub.c` now records:
