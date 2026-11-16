@@ -1,5 +1,6 @@
 #include "weread_internal.h"
 #include "weread_body_decode.h"
+#include "weread_body_buffer.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -692,33 +693,9 @@ static void wr_reader_zfree(voidpf opaque, voidpf ptr) {
     free(ptr);
 }
 
-typedef struct {
-    char *data;
-    size_t used, capacity, limit;
-    bool failed;
-} wr_expand_sink_t;
-
-static bool wr_expand_write(const char *bytes, size_t n, void *arg) {
-    wr_expand_sink_t *sink = arg;
-    if (n > sink->limit - sink->used) {
-        sink->failed = true;
-        return true;
-    }
-    size_t needed = sink->used + n + 1;
-    if (needed > sink->capacity) {
-        size_t next = sink->capacity ? sink->capacity : 1024;
-        while (next < needed && next < sink->limit + 1) {
-            next = next > (sink->limit + 1) / 2 ? sink->limit + 1 : next * 2;
-        }
-        if (next < needed) { sink->failed = true; return true; }
-        char *grown = heap_caps_realloc(sink->data, next, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!grown) { sink->failed = true; return true; }
-        sink->data = grown;
-        sink->capacity = next;
-    }
-    memcpy(sink->data + sink->used, bytes, n);
-    sink->used += n;
-    return false;
+static void *wr_shard_resize(void *previous, size_t bytes, void *context) {
+    (void)context;
+    return heap_caps_realloc(previous, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
@@ -784,7 +761,7 @@ static char *http_request(const char *url, const char *body, const char *referer
     char *data = NULL;
     wr_body_decoder_t *reader_decoder = NULL, *shard_decoder = NULL;
     char *shard_input = NULL;
-    wr_expand_sink_t shard_sink = {.limit = limit};
+    wr_body_buffer_t shard_sink = {.limit = limit, .resize = wr_shard_resize};
     size_t used = 0, capacity = 0;
     int64_t scan_wait_until = 0;
     int64_t reader_deadline = chunk && s_processing_report ? esp_timer_get_time() + 90000000 : 0;
@@ -924,7 +901,7 @@ static char *http_request(const char *url, const char *body, const char *referer
                 shard_decoder = heap_caps_malloc(sizeof(*shard_decoder),
                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (!shard_input || !shard_decoder) { allocation_failed = true; goto cleanup; }
-                wr_body_decoder_init(shard_decoder, wr_expand_write, &shard_sink,
+                wr_body_decoder_init(shard_decoder, wr_body_buffer_write, &shard_sink,
                                      limit, wr_reader_zalloc, wr_reader_zfree);
             }
             size_t remaining = limit - used;
