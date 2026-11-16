@@ -34,7 +34,7 @@ static uint64_t s_cache_image_elapsed_us;
 
 static const void *s_active_tar;
 static size_t s_active_tar_bytes;
-static unsigned s_tar_image_hits;
+static unsigned s_tar_image_hits, s_tar_image_fallbacks;
 
 typedef struct {
     const wr_book_t *book;
@@ -218,7 +218,8 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     int64_t image_started = esp_timer_get_time();
     size_t length = 0;
     const void *borrowed = NULL;
-    bool from_tar = s_active_tar && weread_tar_image_url(url, strlen(url)) &&
+    bool tar_candidate = weread_tar_image_url(url, strlen(url));
+    bool from_tar = s_active_tar && tar_candidate &&
                     wr_tar_find_image(s_active_tar, s_active_tar_bytes,
                                       url, strlen(url), &borrowed, &length);
     char *data = from_tar ? (char *)borrowed : NULL;
@@ -234,6 +235,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
             ++s_tar_image_hits;
         }
     }
+    if (tar_candidate && !from_tar) ++s_tar_image_fallbacks;
     size_t image_limit = 4u * 1024u * 1024u;
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     image_limit = free_psram / 2u; /* do not starve a concurrent next-chapter prefetch */
@@ -595,7 +597,7 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
     s_cache_image_elapsed_us = 0;
     s_active_tar = NULL;
     s_active_tar_bytes = 0;
-    s_tar_image_hits = 0;
+    s_tar_image_hits = s_tar_image_fallbacks = 0;
     if (ok && book->cover[0]) {
         char name[40];
         ok = image_entry(&zip, opf, book->cover, strlen(book->cover), 0, name);
@@ -712,8 +714,9 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
              prefetch_hits, (long long)(prefetch_wait_us / 1000), (int)prefetch_enabled);
 cleanup:
     if (prefetch_enabled) wr_prefetch_end(&prefetch);
-    ESP_LOGI("WEREAD", "cache image reuse hits=%u stored=%u tar_images=%u",
-             s_image_reuse_hits, s_image_reuse_count, s_tar_image_hits);
+    ESP_LOGI("WEREAD", "cache image reuse hits=%u stored=%u tar_images=%u tar_fallbacks=%u",
+             s_image_reuse_hits, s_image_reuse_count, s_tar_image_hits,
+             s_tar_image_fallbacks);
     image_reuse_reset();
     if (nav) fclose(nav);
     if (opf) fclose(opf);
