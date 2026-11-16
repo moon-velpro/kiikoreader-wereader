@@ -911,10 +911,6 @@ static char *http_request(const char *url, const char *body, const char *referer
 cleanup:
     esp_http_client_cleanup(http);
     free(request);
-    if (chunk && complete && !*fields_received && http_body_session_expired(data)) {
-        s_expired = true;
-        s_error_message = "登录已失效，请重新扫码";
-    }
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
         *fields_received = true;
         ESP_LOGI("WEREAD", "reader HTML bytes=%u full_response=%d", (unsigned)used, complete);
