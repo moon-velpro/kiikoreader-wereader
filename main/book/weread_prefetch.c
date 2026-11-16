@@ -21,13 +21,15 @@ static void wr_prefetch_thread(void *arg) {
     }
 }
 
-bool wr_prefetch_begin(wr_prefetch_t *state, wr_prefetch_fetch_fn fn, void *context) {
+bool wr_prefetch_begin(wr_prefetch_t *state, wr_prefetch_fetch_fn fn,
+                       wr_prefetch_release_fn release, void *context) {
     if (!state) return false;
     memset(state, 0, sizeof(*state));
     if (!fn) return false;
 #if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
     if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < 6 * 1024 * 1024) return false;
     state->fetch = fn;
+    state->release = release;
     state->context = context;
     state->kick = xSemaphoreCreateBinary();
     state->done = xSemaphoreCreateBinary();
@@ -70,7 +72,8 @@ void wr_prefetch_end(wr_prefetch_t *state) {
     if (!state || !state->task) return;
     if (state->active) {
         xSemaphoreTake(state->done, portMAX_DELAY);
-        free(state->result);
+        if (state->release) state->release(state->result);
+        else free(state->result);
         state->result = NULL;
         state->active = false;
     }
