@@ -342,11 +342,17 @@ static char *cache_fetch_tar(const wr_book_t *book, const wr_chapter_t *chapter,
           : snprintf(tar_url, sizeof(tar_url), "%s", src);
     if (n <= 0 || n >= (int)sizeof(tar_url) ||
         !wr_reader_referer(book->id, chapter->id, reader_referer)) return NULL;
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (free_psram <= 1024u * 1024u) return NULL;
+    size_t limit = free_psram - 1024u * 1024u; /* retain a hard 1 MiB runtime reserve */
+    if (limit > WR_IMG_TAR_LIMIT) limit = WR_IMG_TAR_LIMIT;
+    if (limit < 128u * 1024u) return NULL;
     int64_t started = esp_timer_get_time();
-    char *data = wr_http(tar_url, NULL, reader_referer, WR_IMG_TAR_LIMIT, tar_bytes);
-    ESP_LOGI("WEREAD", "cache chapter tar index=%u bytes=%u elapsed_ms=%lld ok=%d",
-             chapter->index, (unsigned)(tar_bytes ? *tar_bytes : 0),
-             (long long)((esp_timer_get_time() - started) / 1000), (int)(data != NULL));
+    char *data = wr_http(tar_url, NULL, reader_referer, limit, tar_bytes);
+    ESP_LOGI("WEREAD", "cache chapter tar index=%u bytes=%u limit=%u free_psram=%u elapsed_ms=%lld ok=%d",
+             chapter->index, (unsigned)(tar_bytes ? *tar_bytes : 0), (unsigned)limit,
+             (unsigned)free_psram, (long long)((esp_timer_get_time() - started) / 1000),
+             (int)(data != NULL));
     return data;
 }
 
