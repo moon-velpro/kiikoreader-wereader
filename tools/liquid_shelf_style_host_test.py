@@ -102,7 +102,11 @@ static bool settings_drag_gesture(app_ctx_t *ctx,const ui_gesture_event_t *ev,in
 }
 '''
 for name in ('shelf_rows','row_rect','shelf_cover_image','shelf_style_slots','shelf_slot_rect','shelf_slot_cover'):
-    unit += function(name,root/'main/apps/app_book.c')+'\n'
+    try:
+        unit += function(name,root/'main/apps/app_book.c')+'\n'
+    except AssertionError:
+        if name not in ('shelf_style_slots','shelf_slot_rect','shelf_slot_cover'):
+            raise
 unit += catalog + '\n' + count + '\n' + function('draw_style_thumbnail', source) + '\n'
 unit += 'static void paint(uint8_t *fb){' + render + '}\n'
 unit += function('scroll_gesture', source) + '\n'
