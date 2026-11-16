@@ -120,7 +120,7 @@ unit+=r'''
 static void ui_text_box(uint8_t *fb,EpdRect box,int px,const char *text,enum EpdFontFlags align,bool inv){
  assert(box.x>=0&&box.y>=0&&box.x+box.width<=684&&box.y+box.height<=1216);
  if(reading_probe){
-  static const char *const labels[]={"文字设置","排版设置","阅读显示","阅读线","翻页效果","自动翻页","全刷间隔","翻页间隔","按键控制"};
+  static const char *const labels[]={"文字","排版","阅读线","翻页效果","自动翻页","全刷间隔","翻页间隔","按键控制","默认全屏"};
   for(unsigned i=0;i<9;++i)if(!strcmp(text,labels[i])){assert(!(reading_labels&(1u<<i)));reading_labels|=1u<<i;}
  }
  if(image_probe){assert(image_text_count<2);image_text_boxes[image_text_count++]=box;}
