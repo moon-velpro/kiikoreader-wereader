@@ -24,6 +24,10 @@ extern const app_desc_t app_book, app_transfer;
 typedef enum { SHELF, ACCOUNT, ACTIONS, LOGOUT, ASK_WIFI, WORK } wr_view_t;
 /* 书架槽位由样式决定：网格 9、列表 8。数组按上限开，用前先夹紧，改样式不会越界。 */
 #define WR_SLOTS 9
+#ifndef WR_PROGRESS_AREA
+#define WR_PROGRESS_AREA 1
+#endif
+#define WR_PROGRESS_BUCKETS 20
 static wr_view_t s_view;
 static wr_job_t s_job, s_after_wifi;
 static bool s_wait_wifi, s_wifi_open, s_from_home, s_back_to_weread, s_return_once;
@@ -42,6 +46,8 @@ static char s_open[WR_PATH], s_offline[WR_PATH], s_qr[180];
 static const char *s_message;
 static uint8_t *s_cover_pixels;
 static unsigned s_done, s_total;
+static unsigned s_progress_bucket;
+static bool s_progress_valid;
 
 #define WR_SESSION_VERIFY_TTL_US (60LL * 1000LL * 1000LL)
 
@@ -126,6 +132,8 @@ static app_redraw_t start(app_ctx_t *ctx, wr_job_t job) {
     s_has_retry = false;
     s_job = job;
     s_done = s_total = 0;
+    s_progress_bucket = 0;
+    s_progress_valid = false;
     s_qr[0] = 0;
     s_view = WORK;
     if (!wr_start(job, &s_selected, s_selected_index, 0)) {
@@ -269,6 +277,25 @@ static bool action_enabled(int action) {
     return action == 0 || action == 4 || (s_logged && (action != 1 || !s_selected_cached));
 }
 
+static EpdRect progress_area(app_ctx_t *ctx) {
+    (void)ctx;
+    return (EpdRect){112,472,460,100};
+}
+
+static void draw_work_progress(uint8_t *fb) {
+    if (!(s_total || s_job == WR_SYNC || s_job == WR_CACHE)) return;
+    char progress[64];
+    if (s_job == WR_SYNC && !s_total) snprintf(progress,sizeof(progress),"正在连接并获取书架数据…");
+    else if (s_job == WR_SYNC) snprintf(progress,sizeof(progress),"%u / %u 本封面已下载",s_done,s_total);
+    else snprintf(progress,sizeof(progress),"%u / %u",s_done,s_total);
+    EpdRect bar = {122,482,440,24};
+    ui_fill_round_rect(fb,bar,12,0xd8);
+    unsigned pct = !s_total ? 0 : s_done >= s_total ? 100 : (unsigned)(((uint64_t)s_done*100u)/s_total);
+    int fill = (int)((bar.width-4)*pct/100u);
+    if (fill > 0) ui_fill_round_rect(fb,(EpdRect){bar.x+2,bar.y+2,fill,bar.height-4},10,0x50);
+    ui_text_vc(fb,342,542,30,progress,EPD_DRAW_ALIGN_CENTER,false);
+}
+
 static void render(app_ctx_t *ctx, uint8_t *fb) {
     (void)ctx;
     ui_clear_page(fb);
@@ -313,18 +340,7 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         static const char *const labels[] = {"请用微信扫码登录","正在同步书架与封面","正在缓存图文","正在上传本地进度","正在下载云端进度","正在上报阅读时长","正在验证登录状态"};
         ui_text_vc(fb,342,228,29,labels[s_job],EPD_DRAW_ALIGN_CENTER,false);
         if (s_qr[0]) ui_wifi_qr_draw(fb,(EpdRect){137,300,410,410});
-        if (s_total || s_job == WR_SYNC) {
-            char progress[64];
-            if (s_job == WR_SYNC && !s_total) snprintf(progress,sizeof(progress),"正在连接并获取书架数据…");
-            else if (s_job == WR_SYNC) snprintf(progress,sizeof(progress),"%u / %u 本封面已下载",s_done,s_total);
-            else snprintf(progress,sizeof(progress),"%u / %u",s_done,s_total);
-            EpdRect bar = {122,482,440,24};
-            ui_fill_round_rect(fb,bar,12,0xd8);
-            unsigned pct = !s_total ? 0 : s_done >= s_total ? 100 : (unsigned)(((uint64_t)s_done*100u)/s_total);
-            int fill = (int)((bar.width-4)*pct/100u);
-            if (fill > 0) ui_fill_round_rect(fb,(EpdRect){bar.x+2,bar.y+2,fill,bar.height-4},10,0x50);
-            ui_text_vc(fb,342,542,30,progress,EPD_DRAW_ALIGN_CENTER,false);
-        }
+        draw_work_progress(fb);
         button(fb,action_rect(4),"取消",true);
     }
     /* Status messages are modal: keep them off the shelf artwork so covers and
@@ -415,7 +431,28 @@ static app_redraw_t tick(app_ctx_t *ctx) {
             if (*qr) (void)ui_wifi_qr_prepare_text(qr);
             return APP_REDRAW_PAGE;
         }
-        if (done != s_done || total != s_total) { s_done=done; s_total=total; return APP_REDRAW_PAGE; }
+        if (done != s_done || total != s_total) {
+            bool total_changed = total != s_total;
+            s_done = done;
+            s_total = total;
+            if (s_job == WR_CACHE && total) {
+                /* Suppress the 100% frame; completion owns the single final redraw. */
+                if (done >= total) return APP_REDRAW_NONE;
+                unsigned bucket = (unsigned)(((uint64_t)done * WR_PROGRESS_BUCKETS) / total);
+                if (bucket >= WR_PROGRESS_BUCKETS) bucket = WR_PROGRESS_BUCKETS - 1;
+                if (!total_changed && s_progress_valid && bucket == s_progress_bucket)
+                    return APP_REDRAW_NONE;
+                s_progress_bucket = bucket;
+                s_progress_valid = true;
+#if WR_PROGRESS_AREA
+                draw_work_progress(ctx->fb);
+                return APP_REDRAW_AREA;
+#else
+                return APP_REDRAW_PAGE;
+#endif
+            }
+            return APP_REDRAW_PAGE;
+        }
         return APP_REDRAW_NONE;
     }
     if (status == WR_EXPIRED && s_logged) {
@@ -538,7 +575,7 @@ static void locking(app_ctx_t *ctx) { (void)ctx; if (s_view == WORK) wr_cancel()
 const app_desc_t app_weread = {
     .title="微信读书", .detail="微信读书书架", .enter_full=true,
     .persistent_navigation=true, .navigation_visible=navigation, .navigation_enabled=navigation,
-    .main_page_visible=root,
+    .main_page_visible=root, .area_hint=progress_area,
     .on_enter=enter, .on_exit=leave, .on_tick=tick, .render=render,
     .on_nav_reselect=nav_reselect,
     .on_gesture=gesture, .on_key=key, .on_media_lost=lost, .on_media_ready=media,

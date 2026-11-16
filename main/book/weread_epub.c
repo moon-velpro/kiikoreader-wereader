@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -24,26 +25,55 @@
 
 typedef struct { FILE *file, *directory; uint16_t count; } epub_writer_t;
 
+/* The cache worker is the sole owner of this accumulator. */
+typedef struct {
+    uint64_t reader_us, content_us, chapter_fetch_us, chapter_package_us;
+    uint64_t image_fetch_us, image_zip_us, image_bytes;
+    uint64_t zip_crc_us, zip_write_us, file_read_us;
+    uint32_t image_requests, image_successes, image_failures, image_unsupported;
+} wr_cache_metrics_t;
+static wr_cache_metrics_t s_cache_metrics;
+
 static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chapter,
                                  bool *plain, size_t *size, unsigned index) {
-    int64_t started = esp_timer_get_time();
+    const int64_t started = esp_timer_get_time();
+    unsigned attempts = 0;
+    uint64_t reader_elapsed_us = 0, content_elapsed_us = 0;
     wr_reader_t reader;
     char *content = NULL;
     for (unsigned attempt = 0; attempt < 3 && !content && !wr_cancelled(); ++attempt) {
-        if (wr_reader(book->id, chapter->id, &reader))
+        ++attempts;
+        int64_t phase_started = esp_timer_get_time();
+        bool reader_ok = wr_reader(book->id, chapter->id, &reader);
+        uint64_t phase_elapsed = (uint64_t)(esp_timer_get_time() - phase_started);
+        reader_elapsed_us += phase_elapsed;
+        s_cache_metrics.reader_us += phase_elapsed;
+        if (reader_ok) {
+            phase_started = esp_timer_get_time();
             content = wr_chapter_content(book->id, chapter->id, &reader, plain, size);
+            phase_elapsed = (uint64_t)(esp_timer_get_time() - phase_started);
+            content_elapsed_us += phase_elapsed;
+            s_cache_metrics.content_us += phase_elapsed;
+        }
         if (!content && attempt < 2) vTaskDelay(pdMS_TO_TICKS(400u * (attempt + 1)));
     }
+    const int64_t elapsed_us = esp_timer_get_time() - started;
     if (!content) {
         if (!wr_cancelled() && !strcmp(wr_error_message(), "操作失败，请检查网络后重试"))
             wr_error_set("缓存失败：章节下载失败（已自动重试 3 次）");
-        ESP_LOGW("WEREAD", "cache fetch failed index=%u chapter=%s error=%s",
-                 index + 1, chapter->id, wr_error_message());
+        ESP_LOGW("WEREAD",
+                 "cache fetch failed index=%u chapter=%s elapsed_ms=%lld reader_ms=%llu content_ms=%llu attempts=%u error=%s",
+                 index + 1, chapter->id, (long long)(elapsed_us / 1000),
+                 (unsigned long long)(reader_elapsed_us / 1000),
+                 (unsigned long long)(content_elapsed_us / 1000), attempts,
+                 wr_error_message());
         return NULL;
     }
-    ESP_LOGI("WEREAD", "cache fetch index=%u bytes=%u elapsed_ms=%lld result=1",
-             index + 1, (unsigned)*size,
-             (long long)((esp_timer_get_time() - started) / 1000));
+    ESP_LOGI("WEREAD",
+             "cache fetch index=%u bytes=%u elapsed_ms=%lld reader_ms=%llu content_ms=%llu attempts=%u result=1",
+             index + 1, (unsigned)*size, (long long)(elapsed_us / 1000),
+             (unsigned long long)(reader_elapsed_us / 1000),
+             (unsigned long long)(content_elapsed_us / 1000), attempts);
     return content;
 }
 
@@ -63,7 +93,9 @@ static bool zip_entry(epub_writer_t *zip, const char *name, const void *data, si
     long offset = ftell(zip->file);
     if (offset < 0) return false;
     unsigned name_size = strlen(name);
+    int64_t crc_started = esp_timer_get_time();
     uint32_t crc = crc32(0, data, size);
+    s_cache_metrics.zip_crc_us += (uint64_t)(esp_timer_get_time() - crc_started);
     le32(local, 0x04034b50);
     le16(local+4, 20);
     le32(local+14, crc);
@@ -75,10 +107,13 @@ static bool zip_entry(epub_writer_t *zip, const char *name, const void *data, si
     memcpy(central+6, local+4, 24);
     le32(central+42, offset);
     ++zip->count;
-    return fwrite(local, 1, sizeof(local), zip->file) == sizeof(local) &&
+    int64_t write_started = esp_timer_get_time();
+    bool ok = fwrite(local, 1, sizeof(local), zip->file) == sizeof(local) &&
         fwrite(name, 1, name_size, zip->file) == name_size && fwrite(data, 1, size, zip->file) == size &&
         fwrite(central, 1, sizeof(central), zip->directory) == sizeof(central) &&
         fwrite(name, 1, name_size, zip->directory) == name_size;
+    s_cache_metrics.zip_write_us += (uint64_t)(esp_timer_get_time() - write_started);
+    return ok;
 }
 
 static bool zip_finish(epub_writer_t *zip) {
@@ -120,7 +155,10 @@ static bool file_entry(epub_writer_t *zip, const char *name, FILE *entry, size_t
     if (end < 0 || (size_t)end > max || fseek(entry, 0, SEEK_SET)) return false;
     char *data = heap_caps_malloc((size_t)end+1, MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if (!data) return false;
-    bool ok = fread(data, 1, end, entry) == (size_t)end && zip_entry(zip, name, data, end);
+    int64_t read_started = esp_timer_get_time();
+    bool read_ok = fread(data, 1, end, entry) == (size_t)end;
+    s_cache_metrics.file_read_us += (uint64_t)(esp_timer_get_time() - read_started);
+    bool ok = read_ok && zip_entry(zip, name, data, end);
     free(data);
     return ok;
 }
@@ -144,6 +182,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     }
     url[used] = 0;
     int64_t image_started = esp_timer_get_time();
+    ++s_cache_metrics.image_requests;
     size_t length;
     char *data = NULL;
     for (unsigned attempt = 0; attempt < 3 && !data && !wr_cancelled(); ++attempt) {
@@ -152,6 +191,8 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
         if (!data && attempt < 2) vTaskDelay(pdMS_TO_TICKS(350u * (attempt + 1)));
     }
     if (!data) {
+        s_cache_metrics.image_failures++;
+        s_cache_metrics.image_fetch_us += (uint64_t)(esp_timer_get_time() - image_started);
         ESP_LOGW("WEREAD", "cache image id=%u elapsed_ms=%lld result=0 error=%s", id,
                  (long long)((esp_timer_get_time() - image_started) / 1000), wr_error_message());
         /* CrossMux treats embedded illustrations as best-effort: a transient
@@ -159,11 +200,17 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
         name[0] = 0;
         return !wr_cancelled();
     }
+    s_cache_metrics.image_fetch_us += (uint64_t)(esp_timer_get_time() - image_started);
+    s_cache_metrics.image_bytes += length;
     const char *mime, *ext = image_extension(data, length, &mime);
     if (ext) snprintf(name, 40, "i%u.%s", id, ext);
+    int64_t image_zip_started = esp_timer_get_time();
     bool ok = !ext || (zip_entry(zip, name, data, length) &&
         fprintf(opf, "<item id=\"i%u\" href=\"%s\" media-type=\"%s\"%s/>", id, name, mime,
                 id == 0 ? " properties=\"cover-image\"" : "") >= 0);
+    s_cache_metrics.image_zip_us += (uint64_t)(esp_timer_get_time() - image_zip_started);
+    if (ext && ok) s_cache_metrics.image_successes++;
+    else if (!ext) s_cache_metrics.image_unsupported++;
     ESP_LOGI("WEREAD", "cache image id=%u bytes=%u elapsed_ms=%lld result=%d", id,
              (unsigned)length, (long long)((esp_timer_get_time() - image_started) / 1000), ok);
     if (!ext) name[0] = 0;
@@ -385,6 +432,8 @@ static wr_chapter_t *get_chapters(const wr_book_t *book, unsigned *count) {
 }
 
 static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t *chapters, unsigned count) {
+    memset(&s_cache_metrics, 0, sizeof(s_cache_metrics));
+    const int64_t package_started = esp_timer_get_time();
     static const char container[] = "<?xml version=\"1.0\"?><container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"><rootfiles><rootfile full-path=\"book.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>";
     static const char type[] = "application/epub+zip";
     FILE *central = fopen(WR_DIR "/central.part", "w+b");
@@ -412,6 +461,8 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         size_t size = 0;
         bool plain = false;
         char *content = cache_fetch_chapter(book, &chapters[i], &plain, &size, i);
+        int64_t chapter_fetch_done = esp_timer_get_time();
+        s_cache_metrics.chapter_fetch_us += (uint64_t)(chapter_fetch_done - chapter_started);
         if (!content) {
             if (!wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
                 wr_error_set("缓存失败：章节下载失败（已自动重试 3 次）");
@@ -425,6 +476,7 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             free(content);
             goto cleanup;
         }
+        int64_t chapter_package_started = esp_timer_get_time();
         char name[40];
         snprintf(name, sizeof(name), "c%u.xhtml", i);
         FILE *chapter = fopen(WR_DIR "/chapter.part", "w+b");
@@ -435,9 +487,13 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             fprintf(nav,"<li><a href=\"%s\">",name) >= 0 && write_xml(nav,chapters[i].title,strlen(chapters[i].title)) &&
             fputs("</a></li>",nav) != EOF;
         if (chapter) fclose(chapter);
-        ESP_LOGI("WEREAD", "cache chapter book=%s index=%u/%u html_bytes=%u elapsed_ms=%lld result=%d",
+        int64_t chapter_done = esp_timer_get_time();
+        s_cache_metrics.chapter_package_us += (uint64_t)(chapter_done - chapter_package_started);
+        ESP_LOGI("WEREAD", "cache chapter book=%s index=%u/%u html_bytes=%u fetch_ms=%lld package_ms=%lld elapsed_ms=%lld result=%d",
                  book->id, i+1, count, (unsigned)size,
-                 (long long)((esp_timer_get_time()-chapter_started)/1000), ok);
+                 (long long)((chapter_fetch_done-chapter_started)/1000),
+                 (long long)((chapter_done-chapter_package_started)/1000),
+                 (long long)((chapter_done-chapter_started)/1000), ok);
         if (!ok && !wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
             wr_error_set("缓存失败：章节内容处理或图片下载失败");
         if (!ok) ESP_LOGE("WEREAD","cache package failed book=%s chapter=%u title=%s error=%s",book->id,i,chapters[i].title,wr_error_message());
@@ -454,6 +510,21 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             file_entry(&zip, "nav.xhtml", nav, HTML_TEXT_MAX_BYTES) && zip_finish(&zip);
     } else ok = false;
 cleanup:
+    ESP_LOGI("WEREAD",
+             "cache metrics chapters=%u image_requests=%u image_ok=%u image_failed=%u image_unsupported=%u image_bytes=%llu reader_ms=%llu content_ms=%llu chapter_fetch_ms=%llu chapter_package_ms=%llu image_fetch_ms=%llu image_zip_ms=%llu zip_crc_ms=%llu zip_write_ms=%llu file_read_ms=%llu total_ms=%lld",
+             count, s_cache_metrics.image_requests, s_cache_metrics.image_successes,
+             s_cache_metrics.image_failures, s_cache_metrics.image_unsupported,
+             (unsigned long long)s_cache_metrics.image_bytes,
+             (unsigned long long)(s_cache_metrics.reader_us / 1000),
+             (unsigned long long)(s_cache_metrics.content_us / 1000),
+             (unsigned long long)(s_cache_metrics.chapter_fetch_us / 1000),
+             (unsigned long long)(s_cache_metrics.chapter_package_us / 1000),
+             (unsigned long long)(s_cache_metrics.image_fetch_us / 1000),
+             (unsigned long long)(s_cache_metrics.image_zip_us / 1000),
+             (unsigned long long)(s_cache_metrics.zip_crc_us / 1000),
+             (unsigned long long)(s_cache_metrics.zip_write_us / 1000),
+             (unsigned long long)(s_cache_metrics.file_read_us / 1000),
+             (long long)((esp_timer_get_time() - package_started) / 1000));
     if (nav) fclose(nav);
     if (opf) fclose(opf);
     if (central) fclose(central);
@@ -485,18 +556,53 @@ bool wr_cache(const wr_book_t *book, const char *path) {
     FILE *file = fopen(temp, "w+b");
     if (file) (void)setvbuf(file, NULL, _IOFBF, 8192);
     if (!file) { wr_error_set("缓存失败：无法在 SD 卡创建临时书籍文件"); ESP_LOGE("WEREAD","cache temp open failed book=%s path=%s errno=%d",book->id,temp,errno); }
-    bool ok = file && package_book(book, file, chapters, count) && !fflush(file) && !fsync(fileno(file));
+    const int64_t store_started = esp_timer_get_time();
+    uint64_t flush_us = 0, fsync_us = 0, close_us = 0, validate_us = 0, rename_us = 0;
+    bool ok = file && package_book(book, file, chapters, count);
+    if (file && ok) {
+        int64_t phase_started = esp_timer_get_time();
+        int flush_result = fflush(file);
+        flush_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (flush_result) ok = false;
+    }
+    if (file && ok) {
+        int64_t phase_started = esp_timer_get_time();
+        int fsync_result = fsync(fileno(file));
+        fsync_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (fsync_result) ok = false;
+    }
     if (!ok && strcmp(wr_error_message(), "操作失败，请检查网络后重试") && !wr_cancelled()) {
         /* Preserve a more precise HTTP/image error supplied by a lower layer. */
     } else if (!ok && !wr_cancelled()) wr_error_set(file ? "缓存失败：章节处理或 SD 卡写入失败" : "缓存失败：无法在 SD 卡创建临时书籍文件");
-    if (file && fclose(file)) ok = false;
+    if (file) {
+        int64_t phase_started = esp_timer_get_time();
+        int close_result = fclose(file);
+        close_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (close_result) ok = false;
+    }
     if (ok && !wr_cancelled()) {
+        int64_t phase_started = esp_timer_get_time();
         book_epub_t *epub = NULL;
         ok = book_epub_open(temp, &epub) == ESP_OK && book_epub_chapter_count(epub) == count;
         book_epub_close(epub);
-        if (ok && rename(temp, path) != 0) { ok = false; wr_error_set("缓存失败：SD 卡无法保存书籍文件"); }
-        else if (!ok && !wr_cancelled()) wr_error_set("缓存失败：下载后的 EPUB 校验失败");
+        validate_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (ok) {
+            phase_started = esp_timer_get_time();
+            if (rename(temp, path) != 0) {
+                ok = false;
+                wr_error_set("缓存失败：SD 卡无法保存书籍文件");
+            }
+            rename_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        } else if (!wr_cancelled()) wr_error_set("缓存失败：下载后的 EPUB 校验失败");
     } else ok = false;
+    ESP_LOGI("WEREAD",
+             "cache store metrics flush_ms=%llu fsync_ms=%llu close_ms=%llu validate_ms=%llu rename_ms=%llu total_ms=%lld result=%d",
+             (unsigned long long)(flush_us / 1000),
+             (unsigned long long)(fsync_us / 1000),
+             (unsigned long long)(close_us / 1000),
+             (unsigned long long)(validate_us / 1000),
+             (unsigned long long)(rename_us / 1000),
+             (long long)((esp_timer_get_time() - store_started) / 1000), ok);
     if (!ok) unlink(temp);
     free(chapters);
     return ok;
