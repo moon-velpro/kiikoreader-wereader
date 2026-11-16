@@ -2083,38 +2083,42 @@ void wr_reading_stop(bool close) {
         bool persisted = false;
         if (s_report_store_mutex &&
             xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) == pdTRUE) {
-            if (!report_store_flush_locked()) {
-                (void)xSemaphoreGive(s_report_store_mutex);
-                ESP_LOGW("WEREAD", "deferred reading waits for report-store NVS retry");
-            } else {
-            wr_reading_store_t previous;
-            portENTER_CRITICAL(&s_lock);
-            previous = s_deferred_reading;
-            bool already_persisted =
-                previous.milliseconds == s_reading.ms &&
-                previous.library == s_reading.library &&
-                !strcmp(previous.owner, s_reading.owner) &&
-                !strcmp(previous.book_id, s_reading.book.id);
-            if (!already_persisted) {
-                memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
-                memcpy(s_deferred_reading.book_id, s_reading.book.id, sizeof(s_deferred_reading.book_id));
-                memcpy(s_deferred_reading.owner, s_reading.owner, sizeof(s_deferred_reading.owner));
-                s_deferred_reading.library = s_reading.library;
-                s_deferred_reading.milliseconds = s_reading.ms;
-            }
-            portEXIT_CRITICAL(&s_lock);
-            persisted = already_persisted || persist_report_queue_locked();
-            if (!persisted) {
+            if (report_store_flush_locked()) {
+                wr_reading_store_t previous;
                 portENTER_CRITICAL(&s_lock);
-                s_deferred_reading = previous;
+                previous = s_deferred_reading;
+                bool already_persisted =
+                    previous.milliseconds == s_reading.ms &&
+                    previous.library == s_reading.library &&
+                    !strcmp(previous.owner, s_reading.owner) &&
+                    !strcmp(previous.book_id, s_reading.book.id);
+                if (!already_persisted) {
+                    memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
+                    memcpy(s_deferred_reading.book_id, s_reading.book.id,
+                           sizeof(s_deferred_reading.book_id));
+                    memcpy(s_deferred_reading.owner, s_reading.owner,
+                           sizeof(s_deferred_reading.owner));
+                    s_deferred_reading.library = s_reading.library;
+                    s_deferred_reading.milliseconds = s_reading.ms;
+                }
                 portEXIT_CRITICAL(&s_lock);
+
+                persisted = already_persisted || persist_report_queue_locked();
+                if (!persisted) {
+                    portENTER_CRITICAL(&s_lock);
+                    s_deferred_reading = previous;
+                    portEXIT_CRITICAL(&s_lock);
+                }
+                /* On failure the rollback restores the snapshot just flushed. */
+                report_store_set_dirty(false);
+            } else {
+                ESP_LOGW("WEREAD", "deferred reading waits for report-store NVS retry");
             }
-            report_store_set_dirty(false);
             (void)xSemaphoreGive(s_report_store_mutex);
-            }
         }
         if (!persisted)
-            ESP_LOGW("WEREAD", "persist deferred reading failed seconds=%u", s_reading.ms / 1000);
+            ESP_LOGW("WEREAD", "persist deferred reading failed seconds=%u",
+                     s_reading.ms / 1000);
         ESP_LOGW("WEREAD", "report queue full; retaining pending reading seconds=%u",
                  s_reading.ms / 1000);
         s_reading.attached = false;
