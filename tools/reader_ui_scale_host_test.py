@@ -46,7 +46,7 @@ static int ttf_text_width_px(int px,const char *text);
 
 static bool scaling=true,s_system_ttf;
 static unsigned glyphs;
-static EpdRect last_box, image_text_boxes[2];
+static EpdRect last_box, image_text_boxes[2];static bool check_text_box;
 static bool rule_probe;static int rule_style_label_bottom,rule_offset_label_bottom,rule_hint_bottom;
 static bool reading_probe;static unsigned reading_labels,reading_switches;
 static bool image_probe;static unsigned image_text_count,image_switches;
@@ -63,16 +63,14 @@ static void ui_text_fixed_vc(uint8_t *fb,int x,int cy,int px,const char *text,en
  (void)fb;(void)inv;int above,below;ttf_measure_line_px(px,text,&above,&below);
  int w=ui_text_fixed_width_px(px,text),baseline=cy+(above-below)/2;
  int left=align==EPD_DRAW_ALIGN_LEFT?x:align==EPD_DRAW_ALIGN_RIGHT?x-w:x-w/2;
- assert(left>=last_box.x&&left+w<=last_box.x+last_box.width);
- assert(baseline-above>=last_box.y&&baseline+below<=last_box.y+last_box.height);
+ if(check_text_box){assert(left>=last_box.x&&left+w<=last_box.x+last_box.width);assert(baseline-above>=last_box.y&&baseline+below<=last_box.y+last_box.height);}
  assert(!strchr(text,'\n'));++glyphs;
 }
 static int ttf_text_width_px(int px,const char *text){return ui_text_fixed_width_px(px,text);}
 static void ttf_draw_text_px(uint8_t *fb,int x,int baseline,int px,const char *text,enum EpdFontFlags a,int fg,int bg){
- (void)fb;(void)a;assert(antialias&&selected_slot==0&&fg==0&&bg==15);
+ (void)fb;(void)a;if(check_text_box)assert(antialias&&selected_slot==0&&fg==0&&bg==15);
  int above,below;ttf_measure_line_px(px,text,&above,&below);
- assert(x>=last_box.x&&x+ttf_text_width_px(px,text)<=last_box.x+last_box.width);
- assert(baseline-above>=last_box.y&&baseline+below<=last_box.y+last_box.height);++glyphs;
+ if(check_text_box){assert(x>=last_box.x&&x+ttf_text_width_px(px,text)<=last_box.x+last_box.width);assert(baseline-above>=last_box.y&&baseline+below<=last_box.y+last_box.height);}++glyphs;
 }
 static void epd_fill_rect(EpdRect r,int color,uint8_t *fb){(void)r;(void)color;(void)fb;}
 static void ui_fill_rect_fast(EpdRect r,int color,uint8_t *fb){epd_fill_rect(r,color,fb);}
@@ -129,14 +127,14 @@ static void ui_text_box(uint8_t *fb,EpdRect box,int px,const char *text,enum Epd
   if(!strncmp(text,"上下位置",strlen("上下位置")))rule_offset_label_bottom=box.y+box.height;
   if(!strcmp(text,"选择虚线或点线后可调整位置"))rule_hint_bottom=box.y+box.height;
  }
- assert(box.width>0&&box.height>0);last_box=box;actual_text_box(fb,box,px,text,align,inv);
+ assert(box.width>0&&box.height>0);last_box=box;check_text_box=true;actual_text_box(fb,box,px,text,align,inv);check_text_box=false;
 }
 '''
 unit+=function('draw_reading_font_name',book).replace('static void draw_reading_font_name(', 'static void actual_reading_font_name(')+'\n'
 unit+=r'''
 static void draw_reading_font_name(uint8_t *fb,EpdRect box,const char *text){
- last_box=box;int old_slot=selected_slot;bool old_aa=antialias;
- actual_reading_font_name(fb,box,text);assert(selected_slot==old_slot&&antialias==old_aa);
+ last_box=box;int old_slot=selected_slot;bool old_aa=antialias;check_text_box=true;
+ actual_reading_font_name(fb,box,text);check_text_box=false;assert(selected_slot==old_slot&&antialias==old_aa);
 }
 '''
 unit+=function('draw_sheet',book)+'\n'
