@@ -11,6 +11,7 @@ int main(void) {
     assert(!wr_http_body_session_expired("{\"message\":\"errcode -2012\"}"));
     assert(!wr_http_body_session_expired("{\"message\":\"\\\"errcode\\\":-2012\"}"));
     assert(!wr_http_body_session_expired("{\"errcode\" : -2012x}"));
+    assert(!wr_http_body_session_expired_n("{\"errcode\":-2012", strlen("{\"errcode\":-2012")));
     assert(wr_http_body_session_expired("{\"data\":{\"errCode\":-2012}}"));
 
     wr_http_auth_scan_t scan = {0};
