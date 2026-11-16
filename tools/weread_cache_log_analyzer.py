@@ -45,6 +45,10 @@ METRICS_RE = re.compile(
 )
 TOC_RE = re.compile(r"cache toc book=(\S+) chapters=(\d+) elapsed_ms=(\d+)")
 PREFETCH_WAIT_RE = re.compile(r"prefetch_wait_ms=(\d+)")
+STORE_RE = re.compile(
+    r"cache store metrics flush_ms=(\d+) fsync_ms=(\d+) close_ms=(\d+)"
+    r" validate_ms=(\d+) rename_ms=(\d+) total_ms=(\d+) result=(\d+)"
+)
 
 
 def classify_url(url: str) -> str:
@@ -89,6 +93,7 @@ def parse_lines(lines: list[str]) -> dict:
         },
         "toc": {"count": 0, "chapters": 0, "elapsed_ms": 0},
         "cache_metrics": None,
+        "store_metrics": None,
         "prefetch_wait_ms": 0,
         "work": [],
     }
@@ -169,6 +174,14 @@ def parse_lines(lines: list[str]) -> dict:
                 "image_zip_ms", "zip_crc_ms", "zip_write_ms", "file_read_ms", "total_ms",
             )
             report["cache_metrics"] = dict(zip(names, map(int, match.groups())))
+            continue
+
+        match = STORE_RE.search(line)
+        if match:
+            names = ("flush_ms", "fsync_ms", "close_ms", "validate_ms", "rename_ms", "total_ms")
+            values = list(map(int, match.groups()))
+            report["store_metrics"] = dict(zip(names, values[:6]))
+            report["store_metrics"]["result"] = bool(values[6])
             continue
 
         match = TOC_RE.search(line)
@@ -253,6 +266,13 @@ def render_text(report: dict) -> str:
         lines.append(
             f"Image summary: {m['image_ok']} OK / {m['image_failed']} failed / "
             f"{m['image_unsupported']} unsupported, {m['image_bytes']} bytes"
+        )
+    if report["store_metrics"] is not None:
+        m = report["store_metrics"]
+        lines.append(
+            f"SD/store: flush={m['flush_ms']} ms, fsync={m['fsync_ms']} ms, "
+            f"close={m['close_ms']} ms, validate={m['validate_ms']} ms, "
+            f"rename={m['rename_ms']} ms, total={m['total_ms']} ms, ok={m['result']}"
         )
     lines.append(f"Measured prefetch wait: {report['prefetch_wait_ms']} ms")
     if report["request_time_minus_work_ms"] is not None:
