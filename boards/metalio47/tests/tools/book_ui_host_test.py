@@ -109,10 +109,6 @@ typedef struct {uint32_t magic,file_size;uint16_t count,reserved;char path[288];
 #define BOOK_STORE_PATH_MAX 288
 #define UI_BTN_H 84
 #define UI_GAP 12
-#ifndef UI_MARGIN
-#define UI_MARGIN 40
-#endif
-static int ui_content_width(void){return UI_LOCK_WIDTH-2*UI_MARGIN;}
 static EpdRect ui_row_rect(int i,int count,int y,int height){EpdRect r=ui_bar_rect(i,count);r.y=y;r.height=height;return r;}
 static char s_query[65],s_search_draft[65],s_batch_message[128];
 static ui_text_edit_t s_search_input;
@@ -295,9 +291,6 @@ static bool test_shelf_style_requested;
 static void app_device_settings_request_shelf_style(void){test_shelf_style_requested=true;}
 static bool shelf_cache_load(app_ctx_t *ctx){(void)ctx;return false;}
 static void shelf_cache_save(void){}
-static const app_desc_t app_device_settings={0};
-static bool test_shelf_style_requested;
-static void app_device_settings_request_shelf_style(void){test_shelf_style_requested=true;}
 #define UI_KEY_1 1
 #define UI_KEY_2 2
 #define UI_KEY_3 3
@@ -311,14 +304,6 @@ static void prepare_covers(app_ctx_t *ctx){(void)ctx;++test_cover_prepares;}
 static void render(app_ctx_t *ctx,uint8_t *fb){(void)ctx;(void)fb;++test_shelf_renders;}
 static bool s_resume_pending,s_reader_cleanup,s_shake_enabled;
 static bool s_rc_double_pending,s_manage_style_restore,s_reader_return_weread,s_open_from_home;
-static void rc_pause_auto(void){}
-static void rc_stop_auto(void){}
-static void rc_cancel_side(void){}
-static int shelf_order_mode(void);
-static bool shelf_order_desc(void);
-static bool shelf_order_apply(app_ctx_t *ctx,int mode,bool desc);
-static bool app_settings_try_shelf_order(unsigned order){(void)order;return true;}
-static bool s_rc_double_pending,s_manage_style_restore;
 static void rc_pause_auto(void){}
 static void rc_stop_auto(void){}
 static void rc_cancel_side(void){}

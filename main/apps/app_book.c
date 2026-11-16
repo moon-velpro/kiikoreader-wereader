@@ -8962,9 +8962,13 @@ static app_redraw_t shelf_sort_gesture(app_ctx_t*ctx,const ui_gesture_event_t*ev
     const int modes[]={1,2,0,3};
     for(int i=0;i<4;++i){EpdRect r=shelf_sort_menu_rect(i);
         if(ui_rect_hit(r,ev->x0,ev->y0)&&ui_rect_hit(r,ev->x,ev->y)){
-            int mode=modes[i];(void)shelf_order_apply(ctx,mode,mode==shelf_order_mode()?shelf_order_desc():mode!=0);return APP_REDRAW_PAGE;}}
+            int mode=modes[i];
+            if(shelf_order_apply(ctx,mode,mode==shelf_order_mode()?shelf_order_desc():mode!=0))s_sort_menu=false;
+            return APP_REDRAW_PAGE;}}
     for(int i=0;i<2;++i){EpdRect r={390+i*124,482,122,46};
-        if(ui_rect_hit(r,ev->x0,ev->y0)&&ui_rect_hit(r,ev->x,ev->y)){(void)shelf_order_apply(ctx,shelf_order_mode(),i==1);return APP_REDRAW_PAGE;}}
+        if(ui_rect_hit(r,ev->x0,ev->y0)&&ui_rect_hit(r,ev->x,ev->y)){
+            if(shelf_order_apply(ctx,shelf_order_mode(),i==1))s_sort_menu=false;
+            return APP_REDRAW_PAGE;}}
     s_sort_menu=false;return APP_REDRAW_PAGE;
 }
 static app_redraw_t gesture_event(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
