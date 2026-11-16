@@ -29,6 +29,19 @@ int main(void) {
     assert(!wr_http_auth_scan_chunk(&scan, second, strlen(second)));
     assert(wr_http_auth_scan_chunk(&scan, third, strlen(third)));
 
+    /* Do not treat a numeric value ending at a chunk boundary as complete. */
+    memset(&scan, 0, sizeof(scan));
+    first = "{\"errcode\":-2012";
+    second = "0}";
+    assert(!wr_http_auth_scan_chunk(&scan, first, strlen(first)));
+    assert(!wr_http_auth_scan_chunk(&scan, second, strlen(second)));
+
+    memset(&scan, 0, sizeof(scan));
+    first = "{\"errcode\":-2012";
+    second = "}";
+    assert(!wr_http_auth_scan_chunk(&scan, first, strlen(first)));
+    assert(wr_http_auth_scan_chunk(&scan, second, strlen(second)));
+
     memset(&scan, 0, sizeof(scan));
     first = "{\"errc";
     second = "ode\":-2012}";
