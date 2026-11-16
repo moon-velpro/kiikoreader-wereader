@@ -177,7 +177,9 @@ int main(void){uint8_t fb[1]={0};
    }
    EpdRect rule_controls[]={rule_style_rect(0),rule_style_rect(1),rule_style_rect(2),rule_span_rect(0),rule_span_rect(1),s_rule_offset_up,s_rule_offset_reset,s_rule_offset_down,{36,1113,612,72}};
    for(unsigned i=0;i<sizeof(rule_controls)/sizeof(rule_controls[0]);++i)for(unsigned j=0;j<i;++j)assert(!overlap(rule_controls[i],rule_controls[j]));
-   for(int i=0;i<6;++i){EpdRect a=reader_font_card(i);assert(a.y>=reader_font_top()+100&&a.y+a.height<1141);for(int j=0;j<i;++j)assert(!overlap(a,reader_font_card(j)));}
+   for(int i=0;i<4;++i){EpdRect a=reader_font_card(i);assert(a.y>=reader_font_top()+100&&a.y+a.height<1141);for(int j=0;j<i;++j)assert(!overlap(a,reader_font_card(j)));}
+   EpdRect rule_card=reader_font_card(4),aa_card=reader_font_card(5);
+   assert(rule_card.y>=reader_font_top()+100&&rule_card.y+rule_card.height<1141&&aa_card.y>=reader_font_top()+100&&aa_card.y+aa_card.height<1141&&!overlap(rule_card,aa_card));
    EpdRect slider=reader_slider_rect(0);assert(slider.y>reader_font_top()+100&&slider.y+slider.height<reader_font_card(0).y);
    int top=reading_settings_top();
    reading_labels=reading_switches=0;reading_probe=true;
