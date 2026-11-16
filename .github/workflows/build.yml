@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Select Clang for sanitizer host regressions
         shell: bash
         run: |
@@ -21,13 +23,16 @@ jobs:
           echo "$RUNNER_TEMP/kiiko-host-cc" >> "$GITHUB_PATH"
       - name: Board selection and Pico host-test view
         shell: bash
+        env:
+          PR59_BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
         run: |
           python3 tools/license_notices_host_test.py
           python3 tools/tls_bundle_host_test.py
           python3 -m venv "$RUNNER_TEMP/kiiko-tls-python"
           "$RUNNER_TEMP/kiiko-tls-python/bin/python" -m pip install cryptography==50.0.2
           "$RUNNER_TEMP/kiiko-tls-python/bin/python" tools/ota_tls_host_test.py
-          python3 tools/pr59_driver_baseline_host_test.py
+          git fetch --no-tags origin "$PR59_BASE_REF"
+          python3 tools/pr59_driver_baseline_host_test.py FETCH_HEAD
           python3 tools/board_layer_host_test.py
           python3 tools/board_selection_host_test.py
           python3 tools/board_source_view.py --board pico --tests --output build/host/pico
