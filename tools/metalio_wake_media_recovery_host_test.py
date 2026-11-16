@@ -18,6 +18,8 @@ unit = r'''
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#define ESP_LOGW(...) ((void)0)
+#define ESP_LOGI(...) ((void)0)
 typedef int esp_err_t;
 enum {ESP_OK,ESP_ERR_NOT_FINISHED,ESP_ERR_INVALID_STATE,ESP_FAIL};
 enum {READ_PICO_TRANSFER_STOPPED,READ_PICO_TRANSFER_READY,READ_PICO_TRANSFER_UPLOADING};
