@@ -37,6 +37,8 @@ static int read_pico_pmu_poll(void){return poll_error;}
 static const typeof(state) *read_pico_pmu_get(void){return &state;}
 static void read_pico_clear_ioe_int(void){}
 static void vTaskDelay(int ms){clock_us+=(int64_t)ms*1000;}
+// This test isolates key/wake semantics; battery SOC recalibration is outside its fixture.
+static void battery_reset(void){}
 '''
 for name in ('read_pico_pmu_lock_key_serial','keys','read_pico_pmu_keys_pause','read_pico_pmu_keys_resume','read_pico_pmu_latch_power_wakeup','read_pico_pmu_drain_events','read_pico_pmu_take_key_wakeup','read_pico_pmu_take_key_wakeup_single'):
     unit+=function(name,ROOT/'components/read_pico_pmu/metalio_power_adapter.c')+'\n'
