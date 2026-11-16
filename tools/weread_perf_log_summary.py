@@ -28,7 +28,7 @@ def parse_fields(line: str, prefix: str) -> dict:
     if start < 0:
         return {}
     tail = line[start + len(prefix):]
-    fields = dict(re.findall(r"([a-z_]+)=([^\\s]+)", tail))
+    fields = dict(re.findall(r"([a-z_]+)=([^\s]+)", tail))
     for key in list(fields):
         if key in NUMBER_FIELDS:
             try:
@@ -94,8 +94,7 @@ def print_report(report: dict) -> None:
         slow = sorted(report["chapters"], key=lambda x: x.get("elapsed_ms", 0), reverse=True)[:5]
         print("Slowest chapters:")
         for p in slow:
-            print(f"  {p.get('index')}/{p.get('') or p.get('total', '?')} "
-                  f"{p.get('title', '')} elapsed={p.get('elapsed_ms')} ms "
+            print(f"  chapter {p.get('index')} elapsed={p.get('elapsed_ms')} ms "
                   f"fetch={p.get('fetch_ms')} ms transform={p.get('transform_ms')} ms")
 
 
