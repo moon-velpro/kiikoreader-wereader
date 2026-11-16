@@ -1126,10 +1126,16 @@ static bool renew_session(void) {
     wr_account_t updated = s_http_account;
     if (!updated.owner[0]) (void)read_account(&updated);
     char token[sizeof(updated.token)];
-    if (updated.owner[0] && session_cookie_copy("wr_skey", token, sizeof(token)) &&
-        strcmp(updated.token, token)) {
-        snprintf(updated.token, sizeof(updated.token), "%s", token);
-        if (save_account(&updated)) s_http_account = updated;
+    if (updated.owner[0] && session_cookie_copy("wr_skey", token, sizeof(token))) {
+        wr_account_t current;
+        if (read_account(&current) && !strcmp(current.owner, updated.owner) &&
+            current.library == updated.library && strcmp(current.token, token)) {
+            snprintf(current.token, sizeof(current.token), "%s", token);
+            if (save_account(&current)) s_http_account = current;
+        } else if (!read_account(&current) || strcmp(current.owner, updated.owner) ||
+                   current.library != updated.library) {
+            ESP_LOGW("WEREAD", "skip refreshed token save because account changed");
+        }
     }
     s_expired = false;
     ESP_LOGI("WEREAD", "session renewal confirmed refresh_cookie=%d", session_cookie_has("wr_rt"));
