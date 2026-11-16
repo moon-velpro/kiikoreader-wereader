@@ -58,6 +58,9 @@ static const ttf_font_item_t*ttf_font_item(int i){return i>=0&&i<3?&fonts[i]:NUL
 static bool ui_rect_hit(EpdRect r,int x,int y){return x>=r.x&&x<r.x+r.width&&y>=r.y&&y<r.y+r.height;}
 static uint8_t scale=100;
 static bool write_fail;
+static bool shelf_progress_badges;
+static bool app_settings_shelf_progress_badges(void){return shelf_progress_badges;}
+static bool app_settings_set_shelf_progress_badges(bool enabled){if(write_fail)return false;shelf_progress_badges=enabled;return true;}
 static uint8_t app_settings_system_font_size(void){return scale;}
 static void app_settings_set_system_font_size(uint8_t n){if(!write_fail)scale=n;}
 static char system_path[192]="/sdcard/fonts/Old.ttf",reader_path[192]="/sdcard/fonts/Reader.ttf";
