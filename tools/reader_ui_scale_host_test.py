@@ -63,7 +63,12 @@ static void ui_text_fixed_vc(uint8_t *fb,int x,int cy,int px,const char *text,en
  (void)fb;(void)inv;int above,below;ttf_measure_line_px(px,text,&above,&below);
  int w=ui_text_fixed_width_px(px,text),baseline=cy+(above-below)/2;
  int left=align==EPD_DRAW_ALIGN_LEFT?x:align==EPD_DRAW_ALIGN_RIGHT?x-w:x-w/2;
- if(check_text_box){assert(left>=last_box.x&&left+w<=last_box.x+last_box.width);assert(baseline-above>=last_box.y&&baseline+below<=last_box.y+last_box.height);}
+ if(check_text_box){
+  if(left<last_box.x||left+w>last_box.x+last_box.width||baseline-above<last_box.y||baseline+below>last_box.y+last_box.height)
+   fprintf(stderr,"TEXT_FIT_FAIL text='%s' box=(%d,%d,%d,%d) left=%d width=%d baseline=%d above=%d below=%d px=%d\\n",text,last_box.x,last_box.y,last_box.width,last_box.height,left,w,baseline,above,below,px);
+  assert(left>=last_box.x&&left+w<=last_box.x+last_box.width);
+  assert(baseline-above>=last_box.y&&baseline+below<=last_box.y+last_box.height);
+ }
  assert(!strchr(text,'\n'));++glyphs;
 }
 static int ttf_text_width_px(int px,const char *text){return ui_text_fixed_width_px(px,text);}
