@@ -30,6 +30,12 @@ static bool tar_header_valid(const unsigned char *header) {
     return sum == expected;
 }
 
+static bool tar_reject(const void **image, size_t *image_bytes) {
+    *image = NULL;
+    *image_bytes = 0;
+    return false;
+}
+
 bool wr_tar_find_image(const void *archive, size_t bytes,
                        const char *source, size_t source_length,
                        const void **image, size_t *image_bytes) {
@@ -43,7 +49,8 @@ bool wr_tar_find_image(const void *archive, size_t bytes,
     if (first == end) return false;
     const unsigned char *p = archive;
     bool matched = false;
-    for (size_t off = 0; off <= bytes && bytes - off >= 512;) {
+    for (size_t off = 0; off < bytes;) {
+        if (bytes - off < 512) return tar_reject(image, image_bytes);
         const unsigned char *head = p + off;
         bool zero = true;
         for (unsigned i = 0; i < 512; ++i) if (head[i]) { zero = false; break; }
@@ -51,9 +58,10 @@ bool wr_tar_find_image(const void *archive, size_t bytes,
         size_t size = 0;
         if (!tar_header_valid(head) ||
             !tar_octal(head + 124, 12, &size) ||
-            size > bytes - off - 512 || size > SIZE_MAX - 511) return false;
+            size > bytes - off - 512 || size > SIZE_MAX - 511)
+            return tar_reject(image, image_bytes);
         size_t padded = (size + 511) & ~(size_t)511;
-        if (padded > bytes - off - 512) return false;
+        if (padded > bytes - off - 512) return tar_reject(image, image_bytes);
         size_t nl = 0;
         while (nl < 100 && head[nl]) ++nl;
         const unsigned char *basename = head;
@@ -67,7 +75,7 @@ bool wr_tar_find_image(const void *archive, size_t bytes,
         if ((head[156] == '0' || head[156] == 0) && size &&
             basename_size == end - first &&
             !memcmp(basename, source + first, basename_size)) {
-            if (matched) return false; /* basename collision: never choose blindly */
+            if (matched) return tar_reject(image, image_bytes); /* basename collision: never choose blindly */
             matched = true;
             *image = p + off + 512;
             *image_bytes = size;
