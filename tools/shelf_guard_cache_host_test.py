@@ -44,6 +44,8 @@ code+=re.sub(r'^#include[^\n]*\n','',(r/'main/ui/ui_glass.c').read_text(),flags=
 code+=function('main/ui/ui_kit.c','ui_draw_liquid_shelf_rail').replace('void ui_draw_liquid_shelf_rail(', 'static void liquid_rail(')
 code+='static void ui_draw_liquid_shelf_rail(uint8_t *fb,EpdRect r){++guard_draws;liquid_rail(fb,r); }\n'
 code+=function('main/ui/ui_kit.c','ui_rotate_rect_to_fb')
+code+='#ifndef UI_MARGIN\\n#define UI_MARGIN 40\\n#endif\\n#ifndef UI_GAP\\n#define UI_GAP 12\\n#endif\\n'
+code+=function('main/ui/ui_kit.c','ui_content_width')
 t=(r/'main/apps/app_book.c').read_text();a=t.index('#define SHELF_GUARD_CACHE_BYTES');b=t.index('static EpdRect row_rect',a);code+=t[a:b]
 code+=r"""
 static void seed(unsigned value){for(unsigned i=0;i<BYTES;++i)frame[i]=(uint8_t)(i*13+value*19);}
