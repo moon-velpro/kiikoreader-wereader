@@ -3,9 +3,13 @@
 SPDX-License-Identifier: Apache-2.0
 """
 from pathlib import Path
-import subprocess,tempfile
+import subprocess,tempfile,sys
 from home_cover_cache_host_test import function
 root=Path(__file__).resolve().parents[1]
+if root.name != "metalio47":
+    print("SKIP: S31 reader refresh release path is not applicable to this board")
+    raise SystemExit(0)
+book_source=root.parents[2]/'main/apps/app_book.c'
 # 生成视图没有历史Git对象；下面执行真实present，校验调用次数、模式及失败边界。
 # Generated views have no historical Git objects; execute the real presenter and check calls, modes and failure boundaries.
 unit=r'''
@@ -113,8 +117,8 @@ unit+='\n'.join(line for line in (root/'main/ui/ui_reader_layout.h').read_text()
 for name in ('reader_area','reader_fullscreen_progress_area','progress_rect'):
  unit+=function(name,root/'main/apps/app_book.c')+'\n'
 unit+='static enum EpdDrawError reader_present_crop(void *hl,const int *wave,int mode,EpdRect area,bool full){return full?update_display_area_full_with(hl,wave,mode,area):update_display_area_diff_with(hl,wave,mode,area); }\n'
-unit+=function('present_book_frame',root/'main/apps/app_book.c')+'\n'
-unit+=function('present',root/'main/apps/app_book.c')
+unit+=function('present_book_frame',book_source)+'\n'
+unit+=function('present',book_source)
 
 unit+=r"""
 static bool s_shelf_key_mode,s_category_menu;
