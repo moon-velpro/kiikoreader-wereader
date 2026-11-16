@@ -556,18 +556,53 @@ bool wr_cache(const wr_book_t *book, const char *path) {
     FILE *file = fopen(temp, "w+b");
     if (file) (void)setvbuf(file, NULL, _IOFBF, 8192);
     if (!file) { wr_error_set("缓存失败：无法在 SD 卡创建临时书籍文件"); ESP_LOGE("WEREAD","cache temp open failed book=%s path=%s errno=%d",book->id,temp,errno); }
-    bool ok = file && package_book(book, file, chapters, count) && !fflush(file) && !fsync(fileno(file));
+    const int64_t store_started = esp_timer_get_time();
+    uint64_t flush_us = 0, fsync_us = 0, close_us = 0, validate_us = 0, rename_us = 0;
+    bool ok = file && package_book(book, file, chapters, count);
+    if (file && ok) {
+        int64_t phase_started = esp_timer_get_time();
+        int flush_result = fflush(file);
+        flush_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (flush_result) ok = false;
+    }
+    if (file && ok) {
+        int64_t phase_started = esp_timer_get_time();
+        int fsync_result = fsync(fileno(file));
+        fsync_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (fsync_result) ok = false;
+    }
     if (!ok && strcmp(wr_error_message(), "操作失败，请检查网络后重试") && !wr_cancelled()) {
         /* Preserve a more precise HTTP/image error supplied by a lower layer. */
     } else if (!ok && !wr_cancelled()) wr_error_set(file ? "缓存失败：章节处理或 SD 卡写入失败" : "缓存失败：无法在 SD 卡创建临时书籍文件");
-    if (file && fclose(file)) ok = false;
+    if (file) {
+        int64_t phase_started = esp_timer_get_time();
+        int close_result = fclose(file);
+        close_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (close_result) ok = false;
+    }
     if (ok && !wr_cancelled()) {
+        int64_t phase_started = esp_timer_get_time();
         book_epub_t *epub = NULL;
         ok = book_epub_open(temp, &epub) == ESP_OK && book_epub_chapter_count(epub) == count;
         book_epub_close(epub);
-        if (ok && rename(temp, path) != 0) { ok = false; wr_error_set("缓存失败：SD 卡无法保存书籍文件"); }
-        else if (!ok && !wr_cancelled()) wr_error_set("缓存失败：下载后的 EPUB 校验失败");
+        validate_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        if (ok) {
+            phase_started = esp_timer_get_time();
+            if (rename(temp, path) != 0) {
+                ok = false;
+                wr_error_set("缓存失败：SD 卡无法保存书籍文件");
+            }
+            rename_us += (uint64_t)(esp_timer_get_time() - phase_started);
+        } else if (!wr_cancelled()) wr_error_set("缓存失败：下载后的 EPUB 校验失败");
     } else ok = false;
+    ESP_LOGI("WEREAD",
+             "cache store metrics flush_ms=%llu fsync_ms=%llu close_ms=%llu validate_ms=%llu rename_ms=%llu total_ms=%lld result=%d",
+             (unsigned long long)(flush_us / 1000),
+             (unsigned long long)(fsync_us / 1000),
+             (unsigned long long)(close_us / 1000),
+             (unsigned long long)(validate_us / 1000),
+             (unsigned long long)(rename_us / 1000),
+             (long long)((esp_timer_get_time() - store_started) / 1000), ok);
     if (!ok) unlink(temp);
     free(chapters);
     return ok;
