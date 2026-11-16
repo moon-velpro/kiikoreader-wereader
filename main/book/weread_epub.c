@@ -237,12 +237,14 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     }
     if (tar_candidate && !from_tar) ++s_tar_image_fallbacks;
     size_t image_limit = 4u * 1024u * 1024u;
-    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    image_limit = free_psram / 2u; /* do not starve a concurrent next-chapter prefetch */
-    if (image_limit > 4u * 1024u * 1024u) image_limit = 4u * 1024u * 1024u;
-    if (image_limit < 64u * 1024u) {
-        name[0] = 0;
-        return !wr_cancelled();
+    if (!data) {
+        size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        image_limit = free_psram / 2u; /* do not starve a concurrent next-chapter prefetch */
+        if (image_limit > 4u * 1024u * 1024u) image_limit = 4u * 1024u * 1024u;
+        if (image_limit < 64u * 1024u) {
+            name[0] = 0;
+            return !wr_cancelled();
+        }
     }
     for (unsigned attempt = 0; attempt < 3 && !data && !wr_cancelled(); ++attempt) {
         data = wr_http(url, NULL, NULL, image_limit, &length);
