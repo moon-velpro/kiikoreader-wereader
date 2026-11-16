@@ -795,9 +795,9 @@ static char *http_request_impl(const char *url, const char *body, const char *re
     memcpy(request->cookie_snapshot, s_cookies, sizeof(request->cookie_snapshot));
     request->cookie_snapshot[sizeof(request->cookie_snapshot)-1] = 0;
     cookie_unlock();
-    /* Keep the proven open/fetch/read path for complete responses. The experimental
-     * esp_http_client_perform() keep-alive path returned non-2xx during a real
-     * WeRead cache request; do not reuse it until the server response is diagnosed. */
+    /* Safe fallback path. Cache jobs try the reusable perform() path above;
+     * its per-job circuit breaker routes all remaining requests here after the
+     * first transport, status, or decode failure. */
     http_keepalive_drop();
     esp_http_client_config_t config = {
         /* Keep the HTTP/TLS working set modest on S31: the panel and Wi-Fi
