@@ -29,7 +29,7 @@ static const char *tar_image_src(const char *p, const char *end, size_t *length)
         const char *value = p;
         while (p < end && (quote ? *p != quote : !isspace((unsigned char)*p))) ++p;
         if ((key_size == 3 && !strncasecmp(key, "src", 3)) ||
-            (key_size == 9 && !strncasecmp(key, "xlink:href", 9))) {
+            (key_size == 10 && !strncasecmp(key, "xlink:href", 10))) {
             *length = (size_t)(p - value);
             return value;
         }
