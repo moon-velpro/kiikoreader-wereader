@@ -50,15 +50,26 @@ static inline bool wr_http_auth_scan_chunk(wr_http_auth_scan_t *scan,
 
     char prefix[128];
     size_t tail = scan->tail_length;
-    if (tail > sizeof(prefix) - 1) tail = sizeof(prefix) - 1;
+    if (tail > sizeof(prefix)) tail = sizeof(prefix);
     size_t take = length;
-    if (take > sizeof(prefix) - tail - 1) take = sizeof(prefix) - tail - 1;
+    if (take > sizeof(prefix) - tail) take = sizeof(prefix) - tail;
     memcpy(prefix, scan->tail, tail);
     memcpy(prefix + tail, data, take);
-    if (wr_http_body_session_expired_n(prefix, tail + take)) return true;
+    const size_t combined_length = tail + take;
+    if (wr_http_body_session_expired_n(prefix, combined_length)) return true;
 
-    size_t keep = length < sizeof(scan->tail) ? length : sizeof(scan->tail);
-    memcpy(scan->tail, data + length - keep, keep);
+    /* Keep the tail of the combined previous+current data. Keeping only the
+     * current chunk loses a split key when its colon and value arrive later. */
+    size_t keep;
+    const char *source;
+    if (length > take) {
+        keep = length < sizeof(scan->tail) ? length : sizeof(scan->tail);
+        source = data + length - keep;
+    } else {
+        keep = combined_length < sizeof(scan->tail) ? combined_length : sizeof(scan->tail);
+        source = prefix + combined_length - keep;
+    }
+    if (keep) memcpy(scan->tail, source, keep);
     scan->tail_length = keep;
     return false;
 }
