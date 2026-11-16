@@ -4,6 +4,15 @@
 #include <string.h>
 #include "../main/book/weread_tar.h"
 
+static void checksum(unsigned char *header) {
+    memset(header + 148, ' ', 8);
+    unsigned sum = 0;
+    for (unsigned i = 0; i < 512; ++i) sum += header[i];
+    snprintf((char *)header + 148, 7, "%06o", sum);
+    header[154] = 0;
+    header[155] = ' ';
+}
+
 static void member(unsigned char *dst, const char *name, const unsigned char *data, size_t size) {
     assert(size <= 512 && strlen(name) < 100);
     memset(dst, 0, 1024);
@@ -11,6 +20,7 @@ static void member(unsigned char *dst, const char *name, const unsigned char *da
     snprintf((char *)dst + 124, 12, "%011lo", (unsigned long)size);
     dst[156] = '0';
     memcpy(dst + 512, data, size);
+    checksum(dst);
 }
 
 int main(void) {
@@ -34,8 +44,14 @@ int main(void) {
     member(tar + 1024, "other/epub_43208843_44", png, sizeof(png));
     assert(!wr_tar_find_image(tar, sizeof(tar), "epub_43208843_44",
                              strlen("epub_43208843_44"), &data, &bytes));
+    tar[0] ^= 1;
+    assert(!wr_tar_find_image(tar, sizeof(tar), "epub_43208843_44",
+                             strlen("epub_43208843_44"), &data, &bytes));
+    tar[0] ^= 1;
     memset(tar + 124, '9', 12);
-    assert(!wr_tar_find_image(tar, sizeof(tar), "epub_43208843_44", 18, &data, &bytes));
-    puts("PASS: POSIX tar image lookup, relative paths, URL query, missing, ambiguous, malformed");
+    checksum(tar);
+    assert(!wr_tar_find_image(tar, sizeof(tar), "epub_43208843_44",
+                             strlen("epub_43208843_44"), &data, &bytes));
+    puts("PASS: POSIX tar lookup, checksum, overflow, URL query, missing and ambiguous guards");
     return 0;
 }
