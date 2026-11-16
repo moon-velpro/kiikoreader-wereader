@@ -100,13 +100,13 @@ static const char *ttf_font_display_name(void){return "测试字体的名称";}
 static unsigned app_settings_reader_full_pages(void){return 15;}
 static unsigned app_settings_reader_turn_effect(void){return 1;}
 static bool app_settings_reader_vertical_turn(void){return true;}
-static bool app_settings_reader_power_turn(void){return true;}
+bool app_settings_reader_power_turn(void){return true;}
 static bool app_settings_reader_default_fullscreen(void){return true;}
 static bool app_settings_reader_immersive(void){return false;}
 static bool app_settings_reader_hide_images(void){return false;}
 static unsigned s_rc_tab;
 static struct {bool running;} s_rc_auto;
-static bool s_fonts_reload_pending,s_book_fonts_pending_value;
+bool s_fonts_reload_pending,s_book_fonts_pending_value;
 static void ui_text_set_system_scale(bool enabled){s_system_ttf=enabled;}
 static void *app_settings_reader_controls(void){return NULL;}
 static unsigned reader_controls_seconds(void *controls){(void)controls;return 30;}
@@ -142,7 +142,7 @@ static void draw_reading_font_name(uint8_t *fb,EpdRect box,const char *text){
 unit+=function('draw_sheet',book)+'\n'
 for name in ('reader_ui_extra','reader_font_top','reader_font_card','reader_slider_rect',
              'draw_pill_slider','draw_font_pair','reading_setting_rect','reading_settings_top',
-             'reading_toggle_rect','draw_reading_switch','draw_reading_card','draw_reading_toggle'):
+             'reading_toggle_rect','draw_reading_switch','draw_reading_toggle'):
     unit+=function(name,book)+'\n'
 for name in ['s_font_card','s_weight_card','s_bookfont_card','s_layout_card','s_rule_card','s_antialias_card']:
     unit+=re.search(r'^#define '+name+r' .*',s,re.M)[0]+'\n'
