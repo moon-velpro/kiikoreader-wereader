@@ -412,11 +412,17 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         ok = image_entry(&zip, opf, book->cover, strlen(book->cover), 0, name);
     }
     unsigned image_id = 1;
+    uint64_t fetch_elapsed_us = 0;
+    uint64_t transform_elapsed_us = 0;
+    uint64_t chapter_elapsed_us = 0;
+    s_cache_image_elapsed_us = 0;
     for (unsigned i = 0; ok && i < count && !wr_cancelled(); ++i) {
         int64_t chapter_started = esp_timer_get_time();
         size_t size = 0;
         bool plain = false;
+        int64_t fetch_started = esp_timer_get_time();
         char *content = cache_fetch_chapter(book, &chapters[i], &plain, &size, i);
+        fetch_elapsed_us += (uint64_t)(esp_timer_get_time() - fetch_started);
         if (!content) {
             if (!wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
                 wr_error_set("缓存失败：章节下载失败（已自动重试 3 次）");
@@ -430,6 +436,7 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             free(content);
             goto cleanup;
         }
+        int64_t transform_started = esp_timer_get_time();
         char name[40];
         snprintf(name, sizeof(name), "c%u.xhtml", i);
         FILE *chapter = fopen(WR_DIR "/chapter.part", "w+b");
@@ -440,8 +447,14 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             fprintf(nav,"<li><a href=\"%s\">",name) >= 0 && write_xml(nav,chapters[i].title,strlen(chapters[i].title)) &&
             fputs("</a></li>",nav) != EOF;
         if (chapter) fclose(chapter);
-        ESP_LOGI("WEREAD", "cache chapter book=%s index=%u/%u html_bytes=%u elapsed_ms=%lld result=%d",
+        uint64_t transform_us = (uint64_t)(esp_timer_get_time() - transform_started);
+        transform_elapsed_us += transform_us;
+        chapter_elapsed_us += (uint64_t)(esp_timer_get_time() - chapter_started);
+        ESP_LOGI("WEREAD", "cache chapter book=%s index=%u/%u html_bytes=%u fetch_ms=%lld transform_ms=%lld image_ms=%lld elapsed_ms=%lld result=%d",
                  book->id, i+1, count, (unsigned)size,
+                 (long long)((esp_timer_get_time() - fetch_started) / 1000),
+                 (long long)(transform_us / 1000),
+                 (long long)(s_cache_image_elapsed_us / 1000),
                  (long long)((esp_timer_get_time()-chapter_started)/1000), ok);
         if (!ok && !wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
             wr_error_set("缓存失败：章节内容处理或图片下载失败");
