@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 PREFIXES = {
-    "profile": "cache profile ",
+    "profiles": "cache profile ",
     "prefetch": "cache prefetch ",
     "images": "cache image reuse ",
     "tar": "cache chapter tar ",
