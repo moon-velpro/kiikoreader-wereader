@@ -771,6 +771,8 @@ static char *http_request_impl(const char *url, const char *body, const char *re
     }
     char *absolute = request->absolute;
     const bool service = url[0] == '/';
+    const bool res_archive = !strncasecmp(url, "https://res.weread.qq.com/wrco/",
+                                             sizeof("https://res.weread.qq.com/wrco/") - 1);
     const bool compressed_shard = !chunk && service &&
         !strncmp(url, "/web/book/chapter/", sizeof("/web/book/chapter/") - 1);
     request->capture_service_cookies = service;
@@ -815,6 +817,8 @@ static char *http_request_impl(const char *url, const char *body, const char *re
         esp_http_client_set_header(http,"Origin",WR_HOST);
         if (request->cookie_snapshot[0]) esp_http_client_set_header(http,"Cookie",request->cookie_snapshot);
     }
+    if (res_archive && request->cookie_snapshot[0])
+        esp_http_client_set_header(http, "Cookie", request->cookie_snapshot);
     if (body) {
         esp_http_client_set_method(http, HTTP_METHOD_POST);
         esp_http_client_set_header(http, "Content-Type", "application/json;charset=UTF-8");
@@ -870,6 +874,8 @@ static char *http_request_impl(const char *url, const char *body, const char *re
                 s_error_message = "微信读书图片重定向地址不受支持";
                 goto cleanup;
             }
+            /* Never forward WeRead cookies to CDN signed redirect URLs. */
+            if (res_archive) (void)esp_http_client_delete_header(http, "Cookie");
             if (!wr_url_allowed(redirected,false) || esp_http_client_set_url(http,redirected)!=ESP_OK) {
                 ESP_LOGW("WEREAD","cover redirect target rejected location='%s' target='%s'",request->location,redirected);
                 s_error_message = "微信读书图片重定向地址不受支持";
@@ -887,7 +893,7 @@ static char *http_request_impl(const char *url, const char *body, const char *re
             s_error_message = "微信读书图片重定向地址不受支持";
             goto cleanup;
         }
-        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", url, redirected);
+        ESP_LOGI("WEREAD", "HTTP redirect service=%d archive=%d", (int)service, (int)res_archive);
         snprintf(request->current,sizeof(request->current),"%s",redirected);
         if (code == 301 || code == 302 || code == 303) {
             body_size = 0;
