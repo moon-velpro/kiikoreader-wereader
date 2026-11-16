@@ -118,11 +118,16 @@ static bool reader_fields_chunk(const char *data, size_t length, void *context) 
     return false;
 }
 
-bool wr_reader(const char *book, const char *chapter, wr_reader_t *reader) {
+bool wr_reader_referer(const char *book, const char *chapter, char out[384]) {
     char b[128], c[128];
-    if (!encode_id(book, b) || !encode_id(chapter, c)) return false;
+    if (!out || !encode_id(book, b) || !encode_id(chapter, c)) return false;
+    int n = snprintf(out, 384, WR_HOST "/web/reader/%sk%s", b, c);
+    return n > 0 && n < 384;
+}
+
+bool wr_reader(const char *book, const char *chapter, wr_reader_t *reader) {
     memset(reader, 0, sizeof(*reader));
-    snprintf(reader->referer, sizeof(reader->referer), WR_HOST "/web/reader/%sk%s", b, c);
+    if (!wr_reader_referer(book, chapter, reader->referer)) return false;
     reader_scan_t *scan = heap_caps_calloc(1, sizeof(*scan), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!scan) return false;
     scan->reader = reader;
