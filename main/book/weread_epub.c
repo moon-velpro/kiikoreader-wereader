@@ -24,6 +24,9 @@
 
 typedef struct { FILE *file, *directory; uint16_t count; } epub_writer_t;
 
+/* Observational counters only; no change to request order or buffer ownership. */
+static uint64_t s_cache_image_elapsed_us;
+
 static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chapter,
                                  bool *plain, size_t *size, unsigned index) {
     int64_t started = esp_timer_get_time();
