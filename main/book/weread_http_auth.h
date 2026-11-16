@@ -18,23 +18,46 @@ static inline const char *wr_http_find_bytes(const char *data, size_t length,
     return NULL;
 }
 
+static inline const char *wr_http_find_json_key(const char *body, size_t length,
+                                                   const char *key, size_t key_length) {
+    const char *cursor = body;
+    const char *end = body + length;
+    while (cursor < end) {
+        const char *found = wr_http_find_bytes(cursor, (size_t)(end - cursor), key, key_length);
+        if (!found) return NULL;
+        const char *before = found;
+        while (before > body && isspace((unsigned char)before[-1])) --before;
+        if (before == body || before[-1] == '{' || before[-1] == ',') {
+            const char *value = found + key_length;
+            while (value < end && isspace((unsigned char)*value)) ++value;
+            if (value < end && *value == ':') return found;
+        }
+        cursor = found + 1;
+    }
+    return NULL;
+}
+
 static inline bool wr_http_body_session_expired_n(const char *body, size_t length) {
     if (!body || !length) return false;
     const char *end = body + length;
-    const char *key = wr_http_find_bytes(body, length, "\"errcode\"", 9);
-    const char *alternate = wr_http_find_bytes(body, length, "\"errCode\"", 9);
+    const char *key = wr_http_find_json_key(body, length, "\\"errcode\\"", 9);
+    const char *alternate = wr_http_find_json_key(body, length, "\\"errCode\\"", 9);
     if (!key || (alternate && alternate < key)) key = alternate;
     if (!key) return false;
-    const char *value = memchr(key, ':', (size_t)(end - key));
-    if (!value) return false;
-    ++value;
+
+    const char *value = key + 9;
+    while (value < end && isspace((unsigned char)*value)) ++value;
+    if (value == end || *value++ != ':') return false;
     while (value < end && isspace((unsigned char)*value)) ++value;
     bool quoted = value < end && *value == '"';
     if (quoted) ++value;
     if ((size_t)(end - value) < 5 || memcmp(value, "-2012", 5)) return false;
     value += 5;
-    return quoted ? (value < end && *value == '"') :
-        (value == end || *value == ',' || *value == '}' || isspace((unsigned char)*value));
+    if (quoted) {
+        if (value == end || *value++ != '"') return false;
+    }
+    while (value < end && isspace((unsigned char)*value)) ++value;
+    return value == end || *value == ',' || *value == '}';
 }
 
 static inline bool wr_http_body_session_expired(const char *body) {
