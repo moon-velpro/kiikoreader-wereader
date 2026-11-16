@@ -16,6 +16,15 @@ int main(void) {
     assert(!wr_http_auth_scan_chunk(&scan, first, strlen(first)));
     assert(wr_http_auth_scan_chunk(&scan, second, strlen(second)));
 
+    /* The key, colon, and value may arrive in three separate transport chunks. */
+    memset(&scan, 0, sizeof(scan));
+    first = "{\"errcode\"";
+    second = ":";
+    const char *third = "-2012}";
+    assert(!wr_http_auth_scan_chunk(&scan, first, strlen(first)));
+    assert(!wr_http_auth_scan_chunk(&scan, second, strlen(second)));
+    assert(wr_http_auth_scan_chunk(&scan, third, strlen(third)));
+
     memset(&scan, 0, sizeof(scan));
     first = "{\"errc";
     second = "ode\":-2012}";
