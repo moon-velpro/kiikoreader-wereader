@@ -36,6 +36,23 @@ class WeReadCacheLogAnalyzerTest(unittest.TestCase):
         self.assertEqual(report["request_time_minus_work_ms"], 0)
         self.assertNotIn("book", str(report["http_by_type"]))
 
+    def test_new_phase_metrics(self):
+        lines = [
+            "I WEREAD: cache fetch index=1 bytes=12000 elapsed_ms=900 reader_ms=300 content_ms=500 attempts=1 result=1",
+            "I WEREAD: cache chapter book=book index=1/1 html_bytes=12000 fetch_ms=900 package_ms=200 elapsed_ms=1100 result=1",
+            "I WEREAD: cache metrics chapters=1 image_requests=2 image_ok=2 image_failed=0 image_unsupported=0 image_bytes=8192 reader_ms=300 content_ms=500 chapter_fetch_ms=900 chapter_package_ms=200 image_fetch_ms=150 image_zip_ms=20 zip_crc_ms=5 zip_write_ms=30 file_read_ms=10 total_ms=1150",
+        ]
+        report = parse_lines(lines)
+        self.assertEqual(report["cache_fetch"]["elapsed_ms"], 900)
+        self.assertEqual(report["chapters"]["fetch_ms"], 900)
+        self.assertEqual(report["chapters"]["package_ms"], 200)
+        self.assertEqual(report["cache_metrics"]["reader_ms"], 300)
+        self.assertEqual(report["cache_metrics"]["image_ok"], 2)
+        self.assertEqual(report["cache_metrics"]["total_ms"], 1150)
+        summary = render_text(report)
+        self.assertIn("Package stages:", summary)
+        self.assertIn("image-fetch=150 ms", summary)
+
     def test_failed_chapter_is_counted(self):
         report = parse_lines([
             "W WEREAD: cache fetch index=3 bytes=0 elapsed_ms=2000 result=0",
@@ -43,6 +60,13 @@ class WeReadCacheLogAnalyzerTest(unittest.TestCase):
         ])
         self.assertEqual(report["cache_fetch"]["failures"], 1)
         self.assertEqual(report["chapters"]["failures"], 1)
+
+    def test_failed_fetch_with_phase_breakdown(self):
+        report = parse_lines([
+            "W WEREAD: cache fetch failed index=3 chapter=uid elapsed_ms=2100 reader_ms=800 content_ms=900 attempts=2 error=network"
+        ])
+        self.assertEqual(report["cache_fetch"]["failures"], 1)
+        self.assertEqual(report["cache_fetch"]["elapsed_ms"], 2100)
 
     def test_text_summary_is_standalone(self):
         report = parse_lines(["I WEREAD: work done kind=2 ok=1 canceled=0 elapsed_ms=1000"])
