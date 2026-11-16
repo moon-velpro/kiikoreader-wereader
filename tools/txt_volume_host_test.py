@@ -238,6 +238,7 @@ with tempfile.TemporaryDirectory(prefix='kiiko-volumes-') as tmp:
     header=(ROOT/'main/book/book_epub.h').read_text();stubs=[]
     for m in re.finditer(r'^(?:const char\s*\*|size_t|uint32_t|bool|void|int|esp_err_t)\s*book_epub_\w+\([^;]*\);',header,re.M):
         proto=m.group()[:-1];ret=proto.split('book_epub_')[0].strip();stubs.append(proto+' {'+('' if ret=='void' else 'return 0;')+'}')
+    stubs.append('uint16_t book_epub_cached_chapter_count(const char *path,uint32_t size,int64_t modified) { return 0; }')
     c=t/'test.c';c.write_text(base+'\n'+ui+'\n'+HARNESS+'\n'+'\n'.join(stubs));exe=t/'test'
     subprocess.run(['cc','-std=c11','-D_DEFAULT_SOURCE','-DKIIKO_BOARD_METALIO47='+str(int('--s31' in sys.argv)),'-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-unused-function','-Wno-unused-variable','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',
                     '-I'+str(t),'-I'+str(ROOT/'main/book'),'-I'+str(ROOT/'main/apps'),'-I'+str(ROOT/'main'),'-I'+str(ROOT/'tools/book_epub_stubs'),str(c),str(ROOT/'main/book/gbk.c'),'-o',str(exe)],check=True)
