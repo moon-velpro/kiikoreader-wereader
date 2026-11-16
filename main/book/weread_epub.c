@@ -1,5 +1,6 @@
 #include "weread_internal.h"
 #include "weread_zip_stream.h"
+#include "weread_prefetch.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -27,6 +28,14 @@ typedef struct { FILE *file, *directory; uint16_t count; } epub_writer_t;
 
 /* Observational counters only; no change to request order or buffer ownership. */
 static uint64_t s_cache_image_elapsed_us;
+#define WR_PREFETCH_CHAPTER 1
+
+typedef struct {
+    const wr_book_t *book;
+    const wr_chapter_t *chapters;
+} cache_prefetch_input_t;
+
+static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain);
 
 static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chapter,
                                  bool *plain, size_t *size, unsigned index) {
@@ -49,6 +58,11 @@ static char *cache_fetch_chapter(const wr_book_t *book, const wr_chapter_t *chap
              index + 1, (unsigned)*size,
              (long long)((esp_timer_get_time() - started) / 1000));
     return content;
+}
+
+static void *cache_prefetch_fetch(void *arg, unsigned index, size_t *size, bool *plain) {
+    cache_prefetch_input_t *input = arg;
+    return cache_fetch_chapter(input->book, &input->chapters[index], plain, size, index);
 }
 
 static void le16(uint8_t *dest, unsigned value) {
@@ -460,6 +474,19 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         ok = image_entry(&zip, opf, book->cover, strlen(book->cover), 0, name);
     }
     unsigned image_id = 1;
+    cache_prefetch_input_t prefetch_input = {.book = book, .chapters = chapters};
+    wr_prefetch_t prefetch = {0};
+    bool prefetch_enabled = false;
+#if WR_PREFETCH_CHAPTER
+    if (ok && count > 1) {
+        prefetch_enabled = wr_prefetch_begin(&prefetch, cache_prefetch_fetch, &prefetch_input);
+        ESP_LOGI("WEREAD", "cache chapter prefetch enabled=%d psram_free=%u",
+                 (int)prefetch_enabled,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+#endif
+    uint64_t prefetch_wait_us = 0;
+    unsigned prefetch_hits = 0;
     uint64_t fetch_elapsed_us = 0;
     uint64_t transform_elapsed_us = 0;
     uint64_t chapter_elapsed_us = 0;
@@ -469,7 +496,14 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         size_t size = 0;
         bool plain = false;
         int64_t fetch_started = esp_timer_get_time();
-        char *content = cache_fetch_chapter(book, &chapters[i], &plain, &size, i);
+        char *content = NULL;
+        if (prefetch_enabled && i) {
+            content = wr_prefetch_take(&prefetch, i, &size, &plain);
+            prefetch_wait_us += (uint64_t)(esp_timer_get_time() - fetch_started);
+            if (content) ++prefetch_hits;
+        }
+        if (!content && !wr_cancelled())
+            content = cache_fetch_chapter(book, &chapters[i], &plain, &size, i);
         fetch_elapsed_us += (uint64_t)(esp_timer_get_time() - fetch_started);
         if (!content) {
             if (!wr_cancelled() && !strcmp(wr_error_message(),"操作失败，请检查网络后重试"))
@@ -483,6 +517,12 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
                 !fflush(target) && !ftruncate(fileno(target), size);
             free(content);
             goto cleanup;
+        }
+        /* Fetch chapter i+1 on a PSRAM-stack worker while current chapter
+         * conversion and SD writes run. HTTP is gated to one TLS request at a
+         * time, so this is CPU/I/O overlap rather than parallel TLS sockets. */
+        if (prefetch_enabled && i + 1 < count && !wr_cancelled()) {
+            (void)wr_prefetch_arm(&prefetch, i + 1);
         }
         int64_t transform_started = esp_timer_get_time();
         char name[40];
@@ -525,7 +565,10 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
              (long long)(transform_elapsed_us / 1000),
              (long long)(s_cache_image_elapsed_us / 1000),
              (long long)(chapter_elapsed_us / 1000));
+    ESP_LOGI("WEREAD", "cache prefetch hits=%u wait_ms=%lld enabled=%d",
+             prefetch_hits, (long long)(prefetch_wait_us / 1000), (int)prefetch_enabled);
 cleanup:
+    if (prefetch_enabled) wr_prefetch_end(&prefetch);
     ESP_LOGI("WEREAD", "cache image reuse hits=%u stored=%u",
              s_image_reuse_hits, s_image_reuse_count);
     image_reuse_reset();
