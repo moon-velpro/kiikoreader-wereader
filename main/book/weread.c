@@ -99,6 +99,9 @@ typedef struct {
 } wr_http_context_t;
 static StaticSemaphore_t s_cookie_mutex_storage;
 static SemaphoreHandle_t s_cookie_mutex;
+static StaticSemaphore_t s_http_gate_storage;
+static SemaphoreHandle_t s_http_gate;
+static _Atomic bool s_cache_cookie_dirty;
 static wr_result_t s_result;
 static wr_job_t s_active_job;
 static atomic_bool s_cancel;
@@ -352,7 +355,8 @@ static esp_err_t capture_cookie(esp_http_client_event_t *event) {
         if (used) { memcpy(s_cookies+used,"; ",2); used+=2; }
         memcpy(s_cookies+used,header,len);
         s_cookies[used+len]=0;
-        save_session_cookies();
+        if (s_active_job == WR_CACHE) atomic_store(&s_cache_cookie_dirty, true);
+        else save_session_cookies();
     }
     cookie_unlock();
     return ESP_OK;
@@ -704,7 +708,7 @@ static void *wr_shard_resize(void *previous, size_t bytes, void *context) {
     return heap_caps_realloc(previous, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
-static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
+static char *http_request_impl(const char *url, const char *body, const char *referer, size_t limit,
                           size_t *length, wr_http_chunk_fn chunk, void *context,
                           bool *fields_received, bool *post_started) {
     const int64_t request_started_us = esp_timer_get_time();
@@ -1061,6 +1065,18 @@ cleanup:
              (long long)((esp_timer_get_time()-request_started_us)/1000));
     if (length) *length = used;
     return data;
+}
+
+static char *http_request(const char *url, const char *body, const char *referer, size_t limit,
+                          size_t *length, wr_http_chunk_fn chunk, void *context,
+                          bool *fields_received, bool *post_started) {
+    /* One active TLS request at a time: prefetch overlaps CPU/SD work rather
+     * than introducing the multiple TLS contexts that regress on S31. */
+    if (s_http_gate) xSemaphoreTake(s_http_gate, portMAX_DELAY);
+    char *result = http_request_impl(url, body, referer, limit, length, chunk,
+                                     context, fields_received, post_started);
+    if (s_http_gate) xSemaphoreGive(s_http_gate);
+    return result;
 }
 
 char *wr_http(const char *url, const char *body, const char *referer, size_t limit, size_t *length) {
@@ -1614,6 +1630,7 @@ static void run_work(const wr_work_t *work) {
     if (work->kind == WR_CACHE) {
         s_http_shard_fast_disabled = false;
         s_http_shard_fast_hits = s_http_shard_fast_fallbacks = 0;
+        atomic_store(&s_cache_cookie_dirty, false);
     }
     if (cache_radio_boost) {
         radio_hold(true);
@@ -1674,6 +1691,12 @@ static void run_work(const wr_work_t *work) {
         s_expired = true;
     }
     if (work->kind == WR_CACHE) {
+        /* Deferred NVS writes belong on the original internal-stack worker. */
+        if (atomic_exchange(&s_cache_cookie_dirty, false)) {
+            cookie_lock();
+            save_session_cookies();
+            cookie_unlock();
+        }
         ESP_LOGI("WEREAD", "cache shard keep-alive hits=%u fallbacks=%u disabled=%d",
                  s_http_shard_fast_hits, s_http_shard_fast_fallbacks,
                  (int)s_http_shard_fast_disabled);
@@ -1875,8 +1898,9 @@ static void worker_task(void *arg) {
 void wr_init(void) {
     if (s_worker) return;
     if (!s_cookie_mutex) s_cookie_mutex = xSemaphoreCreateMutexStatic(&s_cookie_mutex_storage);
-    if (!s_cookie_mutex) {
-        ESP_LOGE("WEREAD", "cookie mutex initialization failed");
+    if (!s_http_gate) s_http_gate = xSemaphoreCreateMutexStatic(&s_http_gate_storage);
+    if (!s_cookie_mutex || !s_http_gate) {
+        ESP_LOGE("WEREAD", "HTTP/cookie mutex initialization failed");
         return;
     }
     s_worker = xTaskCreateStatic(worker_task, "weread", sizeof(s_worker_stack),
