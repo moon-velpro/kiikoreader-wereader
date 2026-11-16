@@ -9,6 +9,7 @@ from home_cover_cache_host_test import function
 root = Path(__file__).resolve().parents[1]
 book = root / 'main/apps/app_book.c'
 unit = r'''
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,6 +20,7 @@ unit = r'''
 #define UI_LOCK_WIDTH 684
 #define UI_LOCK_HEIGHT 1216
 #define UI_GRAY_WHITE 255
+#define UI_GRAY_BLACK 0
 #define UI_NAV_BACKGROUND_GRAY 0xe0
 #define UI_GRAY_LIGHT 192
 #define READER_TOOL_ICON_PX 40
@@ -76,6 +78,7 @@ static void ttf_draw_text_px(uint8_t *fb,int x,int y,int px,const char *text,int
 }
 static void draw_reader_metadata(uint8_t *fb,size_t page){(void)page;ui_fill_rect_fast(ui_reader_footer_for(s_reader_fullscreen,immersive),238,fb);}
 static void ui_fill_round_rect(uint8_t *fb,EpdRect r,int radius,int color){if(radius==16)note_card=r;ui_fill_rect_fast(r,color,fb);}
+static void ui_draw_round_rect(uint8_t *fb,EpdRect r,int radius,int color){(void)fb;(void)r;(void)radius;(void)color;}
 static void ui_text_vc(uint8_t *fb,int x,int y,int px,const char *text,int align,bool inverse){(void)fb;(void)x;(void)y;(void)px;(void)text;(void)align;(void)inverse;}
 static bool reader_chapter_undo_visible(void){return false;}
 static EpdRect reader_chapter_undo_rect(void){return(EpdRect){0,0,20,20};}
