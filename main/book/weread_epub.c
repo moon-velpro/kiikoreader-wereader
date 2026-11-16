@@ -214,11 +214,22 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     int64_t image_started = esp_timer_get_time();
     size_t length = 0;
     const void *borrowed = NULL;
-    bool from_tar = s_active_tar &&
+    bool from_tar = s_active_tar && weread_tar_image_url(url, strlen(url)) &&
                     wr_tar_find_image(s_active_tar, s_active_tar_bytes,
                                       url, strlen(url), &borrowed, &length);
-    if (from_tar) ++s_tar_image_hits;
     char *data = from_tar ? (char *)borrowed : NULL;
+    if (from_tar) {
+        const char *tar_mime = NULL;
+        if (length > 4u * 1024u * 1024u || !image_extension(data, length, &tar_mime)) {
+            /* The archive can contain non-image or oversized entries. Keep the
+             * old per-image path as the correctness fallback. */
+            data = NULL;
+            length = 0;
+            from_tar = false;
+        } else {
+            ++s_tar_image_hits;
+        }
+    }
     for (unsigned attempt = 0; attempt < 3 && !data && !wr_cancelled(); ++attempt) {
         data = wr_http(url, NULL, NULL, 4*1024*1024, &length);
         if (!data && !strcmp(wr_error_message(), "微信读书图片地址不受支持")) break;
@@ -280,12 +291,20 @@ static const char *image_src(const char *p, const char *end, size_t *length) {
     return NULL;
 }
 
-static bool chapter_has_tar_images(const char *data) {
+static bool weread_tar_image_url(const char *src, size_t length) {
     static const char *const prefixes[] = {
         "https://res.weread.qq.com/wrepub/",
         "http://res.weread.qq.com/wrepub/",
         "//res.weread.qq.com/wrepub/"
     };
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
+        size_t n = strlen(prefixes[i]);
+        if (length >= n && !strncasecmp(src, prefixes[i], n)) return true;
+    }
+    return false;
+}
+
+static bool chapter_has_tar_images(const char *data) {
     for (const char *p = data; p && *p;) {
         if (*p != '<') { ++p; continue; }
         bool image = !strncasecmp(p, "<img", 4) &&
@@ -297,13 +316,7 @@ static bool chapter_has_tar_images(const char *data) {
         if (!end) return false;
         size_t length = 0;
         const char *src = image_src(p + (image ? 4 : 6), end, &length);
-        if (src) {
-            for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
-                size_t prefix_size = strlen(prefixes[i]);
-                if (length >= prefix_size && !strncasecmp(src, prefixes[i], prefix_size))
-                    return true;
-            }
-        }
+        if (src && weread_tar_image_url(src, length)) return true;
         p = end + 1;
     }
     return false;
