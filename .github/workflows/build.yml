@@ -24,6 +24,11 @@ jobs:
         run: |
           python3 tools/license_notices_host_test.py
           python3 tools/tls_bundle_host_test.py
+          mkdir -p build/book-tests
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -Imain/book tools/weread_http_log_host_test.c -o build/book-tests/weread-http-log
+          build/book-tests/weread-http-log
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -Imain/book tools/weread_http_auth_host_test.c -o build/book-tests/weread-http-auth
+          build/book-tests/weread-http-auth
           python3 -m venv "$RUNNER_TEMP/kiiko-tls-python"
           "$RUNNER_TEMP/kiiko-tls-python/bin/python" -m pip install cryptography==50.0.2
           "$RUNNER_TEMP/kiiko-tls-python/bin/python" tools/ota_tls_host_test.py

@@ -46,8 +46,18 @@ void html_text_free(html_text_t *text){(void)text;assert(!"TXT test entered EPUB
 bool book_index_cache_prepare(const char *source,const char *tag,uint32_t version,char *path,size_t cap,book_index_cache_header_t *key){
  if(disable_cache)return false;
  assert(!strcmp(tag,"txt")&&version==5);struct stat st;assert(!stat(source,&st));
- *key=(book_index_cache_header_t){.magic=123,.version=version,.source_size=(uint32_t)st.st_size,.modified=st.st_mtime,.path_hash=456};
- return (size_t)snprintf(path,cap,"%s.idx",source)<cap;
+ uint64_t tag_hash=!strcmp(tag,"txt")?456:789;
+ *key=(book_index_cache_header_t){.magic=123,.version=version,.source_size=(uint32_t)st.st_size,.modified=st.st_mtime,.path_hash=tag_hash};
+ const char *suffix=!strcmp(tag,"txt")?".idx":".chapters.idx";
+ int n=snprintf(path,cap,"%s%s",source,suffix);return n>0&&(size_t)n<cap;
+}
+bool book_index_cache_prepare_file(const char *source,const char *tag,uint32_t version,uint64_t size,int64_t modified,char *path,size_t cap,book_index_cache_header_t *key){
+ if(disable_cache)return false;
+ assert(tag&&*tag&&size<=UINT32_MAX);
+ uint64_t tag_hash=!strcmp(tag,"txt")?456:789;
+ *key=(book_index_cache_header_t){.magic=123,.version=version,.source_size=(uint32_t)size,.modified=modified,.path_hash=tag_hash};
+ const char *suffix=!strcmp(tag,"txt")?".idx":".chapters.idx";
+ int n=snprintf(path,cap,"%s%s",source,suffix);return n>0&&(size_t)n<cap;
 }
 FILE *book_index_cache_open_read(const char *path,const book_index_cache_header_t *key){
  FILE *f=fopen(path,"rb");if(!f)return NULL;book_index_cache_header_t found;
@@ -236,7 +246,7 @@ with tempfile.TemporaryDirectory(prefix='kiiko-txt-nav-') as folder:
         assert hashlib.sha256(source.read_bytes()).hexdigest()==digest
     header=(ROOT/'main/book/book_epub.h').read_text()
     stubs=[]
-    for m in re.finditer(r'^(?:const char\s*\*|size_t|uint32_t|bool|void|int|esp_err_t)\s*book_epub_\w+\([^;]*\);',header,re.M):
+    for m in re.finditer(r'^(?:const char\s*\*|size_t|uint16_t|uint32_t|bool|void|int|esp_err_t)\s*book_epub_\w+\([^;]*\);',header,re.M):
         proto=m.group()[:-1];ret=proto.split('book_epub_')[0].strip()
         stubs.append(proto+' {'+('' if ret=='void' else 'return 0;')+'}')
     c=t/'test.c';c.write_text(UNIT+'\n'+'\n'.join(stubs))

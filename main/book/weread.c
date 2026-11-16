@@ -1,4 +1,6 @@
 #include "weread_internal.h"
+#include "weread_http_log.h"
+#include "weread_http_auth.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -33,6 +35,8 @@
 #include "settings.h"
 
 #define WR_MAX_SHELF 8192
+#define WR_REPORT_COUNT 17 /* Expanded queue capacity for transient offline backlog. */
+#define WR_REPORT_STORE_MAGIC UINT32_C(0x57525232)
 #define WR_INDEX WR_DIR "/shelf.bin"
 #define WR_INDEX_TEMP WR_DIR "/shelf.part"
 #define WR_CACHED WR_DIR "/cached.bin"
@@ -54,6 +58,20 @@ typedef struct {
     unsigned failures;
     int64_t retry_at;
 } wr_report_t;
+typedef struct {
+    char book_id[WR_ID], owner[WR_ID];
+    uint32_t library, seconds;
+} wr_report_store_entry_t;
+typedef struct {
+    char book_id[WR_ID], owner[WR_ID];
+    uint32_t library, milliseconds;
+} wr_reading_store_t;
+typedef struct {
+    uint32_t magic;
+    wr_report_store_entry_t entries[WR_REPORT_COUNT];
+    wr_reading_store_t deferred_reading;
+} wr_report_store_t;
+_Static_assert(sizeof(wr_report_store_t) <= 1900, "WeRead report queue must fit in one NVS blob");
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 enum { WR_WORKER_STACK_BYTES = 16 * 1024, WR_HTTP_URL_BYTES = 2080 };
@@ -62,7 +80,7 @@ static DRAM_ATTR StackType_t s_worker_stack[WR_WORKER_STACK_BYTES / sizeof(Stack
 static DRAM_ATTR StaticTask_t s_worker_tcb;
 static TaskHandle_t s_worker;
 static wr_work_t s_work;
-static wr_report_t s_reports[8];
+static wr_report_t s_reports[WR_REPORT_COUNT];
 static bool s_work_pending;
 static bool s_processing_report;
 static bool s_reader_scanning;
@@ -75,8 +93,8 @@ static struct {
     wr_reader_t fields;
     int64_t expires;
 } s_report_fields;
-// Each HTTP request owns redirect and cookie-capture state, so bounded cache
-// prefetch requests can overlap without corrupting one another.
+// Each HTTP request owns its redirect and cookie-capture state. The cache
+// worker currently serializes requests; no shared per-request buffers are assumed.
 typedef struct {
     char absolute[WR_HTTP_URL_BYTES];
     char redirected[WR_HTTP_URL_BYTES];
@@ -89,9 +107,14 @@ typedef struct {
     bool *post_started;
     size_t body_limit, body_used, body_capacity;
     char *body_data;
+    wr_http_auth_scan_t auth_scan;
 } wr_http_context_t;
 static StaticSemaphore_t s_cookie_mutex_storage;
 static SemaphoreHandle_t s_cookie_mutex;
+static StaticSemaphore_t s_report_store_mutex_storage;
+static SemaphoreHandle_t s_report_store_mutex;
+static bool s_report_store_dirty;
+static int64_t s_report_store_retry_at;
 static wr_result_t s_result;
 static wr_job_t s_active_job;
 static atomic_bool s_cancel;
@@ -114,12 +137,23 @@ static struct {
     uint32_t ms;
     bool attached;
 } s_reading;
+static wr_reading_store_t s_deferred_reading;
 static bool s_radio_held;
 
 static void restore_session_cookie(void);
 static bool wr_url_allowed(const char *url, bool service);
 static bool cover_redirect_url(const char *current, const char *location,
                                char out[WR_HTTP_URL_BYTES]);
+static bool renew_session(void);
+
+static bool http_url_is_login(const char *url) {
+    return url && !strncmp(url, "/api/auth/", sizeof("/api/auth/") - 1);
+}
+
+static bool http_url_requires_session(const char *url) {
+    return url && url[0] == '/' && !http_url_is_login(url) &&
+        strcmp(url, "/web/login/renewal");
+}
 
 const char *wr_error_message(void) { return atomic_load(&s_error_message); }
 void wr_error_set(const char *message) { if (message && *message) atomic_store(&s_error_message, message); }
@@ -164,6 +198,120 @@ static void cookie_lock(void) {
 
 static void cookie_unlock(void) {
     if (s_cookie_mutex) (void)xSemaphoreGive(s_cookie_mutex);
+}
+
+/* Caller holds s_report_store_mutex. Monotonic retry deadlines are rebuilt
+ * after boot, so no stale esp_timer_get_time() values enter NVS. */
+static bool persist_report_queue_locked(void) {
+    wr_report_store_t snapshot = {.magic = WR_REPORT_STORE_MAGIC};
+    bool any = false;
+    portENTER_CRITICAL(&s_lock);
+    for (unsigned i = 0; i < WR_REPORT_COUNT; ++i) {
+        const wr_report_t *source = &s_reports[i];
+        if (!source->seconds) continue;
+        wr_report_store_entry_t *target = &snapshot.entries[i];
+        memcpy(target->book_id, source->book_id, sizeof(target->book_id));
+        memcpy(target->owner, source->owner, sizeof(target->owner));
+        target->library = source->library;
+        target->seconds = source->seconds;
+        any = true;
+    }
+    if (s_deferred_reading.milliseconds >= 1000) {
+        snapshot.deferred_reading = s_deferred_reading;
+        any = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+
+    nvs_handle_t nvs;
+    esp_err_t result = nvs_open("weread", NVS_READWRITE, &nvs);
+    if (result == ESP_OK) {
+        if (any) result = nvs_set_blob(nvs, "reports", &snapshot, sizeof(snapshot));
+        else {
+            result = nvs_erase_key(nvs, "reports");
+            if (result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
+        }
+        if (result == ESP_OK) result = nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    return result == ESP_OK;
+}
+
+/* Caller holds s_report_store_mutex. A failed completion write is retried by
+ * the worker before it starts another report, preventing stale NVS state from
+ * silently surviving until the next reboot. */
+static bool report_store_flush_locked(void) {
+    bool dirty;
+    portENTER_CRITICAL(&s_lock);
+    dirty = s_report_store_dirty;
+    portEXIT_CRITICAL(&s_lock);
+    if (!dirty) return true;
+    const int64_t now = esp_timer_get_time();
+    if (s_report_store_retry_at && now < s_report_store_retry_at) return false;
+    if (!persist_report_queue_locked()) {
+        s_report_store_retry_at = now + 500000;
+        return false;
+    }
+    s_report_store_retry_at = 0;
+    portENTER_CRITICAL(&s_lock);
+    s_report_store_dirty = false;
+    portEXIT_CRITICAL(&s_lock);
+    return true;
+}
+
+static void report_store_set_dirty(bool dirty) {
+    s_report_store_retry_at = dirty ? esp_timer_get_time() + 500000 : 0;
+    portENTER_CRITICAL(&s_lock);
+    s_report_store_dirty = dirty;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void load_report_queue(void) {
+    if (!s_report_store_mutex) return;
+    nvs_handle_t nvs;
+    if (nvs_open("weread", NVS_READONLY, &nvs) != ESP_OK) return;
+
+    wr_report_store_t stored;
+    size_t size = sizeof(stored);
+    esp_err_t result = nvs_get_blob(nvs, "reports", &stored, &size);
+    nvs_close(nvs);
+    if (result == ESP_ERR_NVS_NOT_FOUND) return;
+    if (result != ESP_OK || size != sizeof(stored) || stored.magic != WR_REPORT_STORE_MAGIC) {
+        ESP_LOGW("WEREAD", "discard invalid persisted report queue err=%s size=%u",
+                 esp_err_to_name(result), (unsigned)size);
+        return;
+    }
+
+    unsigned loaded = 0;
+    for (unsigned i = 0; i < WR_REPORT_COUNT; ++i) {
+        const wr_report_store_entry_t *source = &stored.entries[i];
+        if (!source->seconds ||
+            !memchr(source->book_id, 0, sizeof(source->book_id)) ||
+            !memchr(source->owner, 0, sizeof(source->owner)) ||
+            !wr_safe(source->book_id) || !wr_safe(source->owner)) continue;
+        wr_report_t *target = &s_reports[i];
+        memcpy(target->book_id, source->book_id, sizeof(target->book_id));
+        memcpy(target->owner, source->owner, sizeof(target->owner));
+        target->library = source->library;
+        target->seconds = source->seconds;
+        target->failures = 0;
+        target->retry_at = 0;
+        ++loaded;
+    }
+    if (stored.deferred_reading.milliseconds >= 1000 &&
+        memchr(stored.deferred_reading.book_id, 0, sizeof(stored.deferred_reading.book_id)) &&
+        memchr(stored.deferred_reading.owner, 0, sizeof(stored.deferred_reading.owner)) &&
+        wr_safe(stored.deferred_reading.book_id) && wr_safe(stored.deferred_reading.owner)) {
+        s_deferred_reading = stored.deferred_reading;
+        memset(&s_reading, 0, sizeof(s_reading));
+        memcpy(s_reading.book.id, stored.deferred_reading.book_id, sizeof(s_reading.book.id));
+        memcpy(s_reading.owner, stored.deferred_reading.owner, sizeof(s_reading.owner));
+        s_reading.library = stored.deferred_reading.library;
+        s_reading.ms = stored.deferred_reading.milliseconds;
+        s_reading.attached = false;
+        s_reading.last = 0;
+        ESP_LOGI("WEREAD", "restored deferred reading seconds=%u", s_reading.ms / 1000);
+    }
+    if (loaded) ESP_LOGI("WEREAD", "restored pending report queue entries=%u", loaded);
 }
 
 static bool clear_session_cookies(void) {
@@ -500,8 +648,10 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
                 s_http_open_failed = true;
                 wr_error_set("微信读书网络连接失败，请检查 Wi-Fi 后重试");
             } else wr_error_set("读取微信读书响应失败");
+            char log_url[256];
+            wr_http_log_target(request->current, log_url, sizeof(log_url));
             ESP_LOGW("WEREAD", "HTTP perform failed url=%s err=%s tls=%s code=%d flags=0x%x bytes=%u",
-                     url, esp_err_to_name(result), esp_err_to_name(tls_error), tls_code,
+                     log_url, esp_err_to_name(result), esp_err_to_name(tls_error), tls_code,
                      (unsigned)tls_flags, (unsigned)request->body_used);
             free(request->body_data);
             request->body_data = NULL;
@@ -533,7 +683,10 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
                 return NULL;
             }
         }
-        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", url, redirected);
+        char log_from[256], log_to[256];
+        wr_http_log_target(request->current, log_from, sizeof(log_from));
+        wr_http_log_target(redirected, log_to, sizeof(log_to));
+        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", log_from, log_to);
         snprintf(absolute, WR_HTTP_URL_BYTES, "%s", redirected);
         if (code == 301 || code == 302 || code == 303) {
             esp_http_client_set_method(http, HTTP_METHOD_GET);
@@ -556,8 +709,10 @@ static char *http_request_reusable(wr_http_context_t *request, const char *url, 
     }
     request->body_data[request->body_used] = 0;
     if (length) *length = request->body_used;
+    char log_url[256];
+    wr_http_log_target(request->current, log_url, sizeof(log_url));
     ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld connection_reused=%d",
-             request->current, (unsigned)request->body_used,
+             log_url, (unsigned)request->body_used,
              (long long)((esp_timer_get_time() - started) / 1000), reused);
     char *result = request->body_data;
     request->body_data = NULL;
@@ -685,7 +840,8 @@ static char *http_request(const char *url, const char *body, const char *referer
     s_http_open_failed = false;
     if (wr_cancelled()) { s_error_message = "操作已取消"; return NULL; }
     if (!wr_online()) { http_keepalive_drop(); s_error_message = "Wi-Fi 未连接或网络尚未就绪"; return NULL; }
-    if (url[0] == '/') restore_session_cookie();
+    const bool login_endpoint = http_url_is_login(url);
+    if (url[0] == '/' && !login_endpoint) restore_session_cookie();
     wr_http_context_t *request = heap_caps_calloc(1, sizeof(*request), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!request) { s_error_message = "内存不足，无法创建微信读书请求"; return NULL; }
     char *absolute = request->absolute;
@@ -757,8 +913,10 @@ static char *http_request(const char *url, const char *body, const char *referer
             s_error_message = "微信读书网络连接失败，请检查 Wi-Fi 后重试";
             int tls_code = 0, tls_flags = 0;
             esp_err_t tls_error = esp_http_client_get_and_clear_last_tls_error(http, &tls_code, &tls_flags);
+            char log_url[256];
+            wr_http_log_target(request->current, log_url, sizeof(log_url));
             ESP_LOGW("WEREAD", "HTTP open failed url=%s err=%s ms=%lld tls=%s code=%d flags=0x%x internal=%u largest=%u",
-                     url, esp_err_to_name(open_error), (long long)((esp_timer_get_time()-open_start)/1000),
+                     log_url, esp_err_to_name(open_error), (long long)((esp_timer_get_time()-open_start)/1000),
                      esp_err_to_name(tls_error), tls_code, (unsigned)tls_flags,
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -772,7 +930,9 @@ static char *http_request(const char *url, const char *body, const char *referer
         }
         declared = esp_http_client_fetch_headers(http);
         code = esp_http_client_get_status_code(http);
-        ESP_LOGI("WEREAD", "HTTP %s code=%d declared=%lld chunked=%d", url, code, (long long)declared,
+        char log_url[256];
+        wr_http_log_target(request->current, log_url, sizeof(log_url));
+        ESP_LOGI("WEREAD", "HTTP %s code=%d declared=%lld chunked=%d", log_url, code, (long long)declared,
                  (int)esp_http_client_is_chunked_response(http));
         bool redirect = code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
         char *redirected = request->redirected;
@@ -780,12 +940,17 @@ static char *http_request(const char *url, const char *body, const char *referer
         if (redirects >= 5) { s_error_message="微信读书封面重定向次数过多"; goto cleanup; }
         if (!service) {
             if (!cover_redirect_url(request->current,request->location,redirected)) {
-                ESP_LOGW("WEREAD","cover redirect invalid location='%s'",request->location);
+                char log_location[256];
+                wr_http_log_target(request->location, log_location, sizeof(log_location));
+                ESP_LOGW("WEREAD","cover redirect invalid location='%s'",log_location);
                 s_error_message = "微信读书图片重定向地址不受支持";
                 goto cleanup;
             }
             if (!wr_url_allowed(redirected,false) || esp_http_client_set_url(http,redirected)!=ESP_OK) {
-                ESP_LOGW("WEREAD","cover redirect target rejected location='%s' target='%s'",request->location,redirected);
+                char log_location[256], log_target[256];
+                wr_http_log_target(request->location, log_location, sizeof(log_location));
+                wr_http_log_target(redirected, log_target, sizeof(log_target));
+                ESP_LOGW("WEREAD","cover redirect target rejected location='%s' target='%s'",log_location,log_target);
                 s_error_message = "微信读书图片重定向地址不受支持";
                 goto cleanup;
             }
@@ -797,11 +962,16 @@ static char *http_request(const char *url, const char *body, const char *referer
             }
         }
         if (!wr_url_allowed(redirected, service)) {
-            ESP_LOGW("WEREAD","redirect target rejected service=%d target='%s'",service,redirected);
+            char log_target[256];
+            wr_http_log_target(redirected, log_target, sizeof(log_target));
+            ESP_LOGW("WEREAD","redirect target rejected service=%d target='%s'",service,log_target);
             s_error_message = "微信读书图片重定向地址不受支持";
             goto cleanup;
         }
-        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", url, redirected);
+        char log_from[256], log_to[256];
+        wr_http_log_target(request->current, log_from, sizeof(log_from));
+        wr_http_log_target(redirected, log_to, sizeof(log_to));
+        ESP_LOGI("WEREAD", "HTTP redirect %s -> %s", log_from, log_to);
         snprintf(request->current,sizeof(request->current),"%s",redirected);
         if (code == 301 || code == 302 || code == 303) {
             body_size = 0;
@@ -810,7 +980,10 @@ static char *http_request(const char *url, const char *body, const char *referer
         esp_http_client_close(http);
         ++redirects;
     }
-    if (service && (code == 401 || code == 403)) { s_expired = true; s_error_message = "登录已失效，请重新扫码"; }
+    if (service && !login_endpoint && (code == 401 || code == 403)) {
+        s_expired = true;
+        s_error_message = "登录已失效，请重新扫码";
+    }
     else if (code < 200 || code >= 300) s_error_message = "微信读书接口返回错误";
     if ((declared < 0 && !esp_http_client_is_chunked_response(http)) ||
         (declared > 0 && (uint64_t)declared > limit) || code != 200) goto cleanup;
@@ -840,6 +1013,11 @@ static char *http_request(const char *url, const char *body, const char *referer
             int n = esp_http_client_read(http, data, (int)(remaining < 2048 ? remaining : 2048));
             if (n < 0) { read_failed = true; goto cleanup; }
             used += (size_t)n;
+            if (n > 0 && service && !login_endpoint &&
+                wr_http_auth_scan_chunk(&request->auth_scan, data, (size_t)n)) {
+                s_expired = true;
+                s_error_message = "登录已失效，请重新扫码";
+            }
             if (n && chunk(data, (size_t)n, context)) {
                 *fields_received = true;
                 break;
@@ -869,11 +1047,15 @@ static char *http_request(const char *url, const char *body, const char *referer
         }
     }
 cleanup:
+    ;
+    char final_log_url[256];
+    wr_http_log_target(request->current, final_log_url, sizeof(final_log_url));
     esp_http_client_cleanup(http);
     free(request);
     if (chunk && (complete || *fields_received) && !wr_cancelled()) {
-        *fields_received = true;
-        ESP_LOGI("WEREAD", "reader HTML bytes=%u full_response=%d", (unsigned)used, complete);
+        /* Completion alone does not mean the reader fields were found. */
+        ESP_LOGI("WEREAD", "reader HTML bytes=%u full_response=%d fields=%d",
+                 (unsigned)used, complete, *fields_received);
         free(data);
         return NULL;
     }
@@ -883,28 +1065,60 @@ cleanup:
         else if (wr_cancelled()) s_error_message = "操作已取消";
         else if (code != 200) { /* Preserve the more specific HTTP/authentication message. */ }
         else s_error_message = "微信读书响应未完整接收";
-        ESP_LOGW("WEREAD", "HTTP read failed url=%s complete=%d bytes=%u", url, (int)complete, (unsigned)used);
+        ESP_LOGW("WEREAD", "HTTP read failed url=%s complete=%d bytes=%u", final_log_url, (int)complete, (unsigned)used);
         free(data); return NULL;
     }
     data[used] = 0;
-    ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", url, (unsigned)used,
+    ESP_LOGI("WEREAD", "HTTP complete url=%s bytes=%u elapsed_ms=%lld", final_log_url, (unsigned)used,
              (long long)((esp_timer_get_time()-request_started_us)/1000));
     if (length) *length = used;
     return data;
 }
 
+static char *http_request_with_session(const char *url, const char *body, const char *referer, size_t limit,
+                                        size_t *length, wr_http_chunk_fn chunk, void *context,
+                                        bool *fields_received, bool *post_started) {
+    const bool service = http_url_requires_session(url);
+    char *data = http_request(url, body, referer, limit, length, chunk, context,
+                              fields_received, post_started);
+    if (service && data && wr_http_body_session_expired(data)) {
+        free(data);
+        data = NULL;
+        s_expired = true;
+        s_error_message = "登录已失效，请重新扫码";
+    }
+    bool streamed = fields_received && *fields_received;
+    if (data || streamed || !service || !s_expired || wr_cancelled()) return data;
+
+    /* A 401/403 or explicit -2012 response is a confirmed rejection, so retrying
+     * this POST cannot duplicate an accepted report. Clear the first attempt marker. */
+    if (post_started) *post_started = false;
+    if (fields_received) *fields_received = false;
+    if (!renew_session()) return NULL;
+    data = http_request(url, body, referer, limit, length, chunk, context,
+                        fields_received, post_started);
+    if (service && data && wr_http_body_session_expired(data)) {
+        s_expired = true;
+        s_error_message = "登录已失效，请重新扫码";
+    }
+    /* A second explicit auth rejection is still a known rejection, not an
+     * ambiguous POST outcome. Preserve the queued duration for a later retry. */
+    if (service && s_expired && post_started) *post_started = false;
+    return data;
+}
+
 char *wr_http(const char *url, const char *body, const char *referer, size_t limit, size_t *length) {
-    return http_request(url, body, referer, limit, length, NULL, NULL, NULL, NULL);
+    return http_request_with_session(url, body, referer, limit, length, NULL, NULL, NULL, NULL);
 }
 
 bool wr_http_reader_fields(const char *url, size_t limit, wr_http_chunk_fn chunk, void *context) {
     bool received = false;
-    http_request(url, NULL, WR_HOST "/", limit, NULL, chunk, context, &received, NULL);
+    http_request_with_session(url, NULL, WR_HOST "/", limit, NULL, chunk, context, &received, NULL);
     return received;
 }
 
 char *wr_http_report(const char *body, const char *referer, bool *post_started) {
-    return http_request("/web/book/read", body, referer, 16384, NULL, NULL, NULL, NULL, post_started);
+    return http_request_with_session("/web/book/read", body, referer, 16384, NULL, NULL, NULL, NULL, post_started);
 }
 
 static void *json_alloc(size_t size) { return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
@@ -946,36 +1160,42 @@ static bool renew_session(void) {
         ESP_LOGW("WEREAD", "session renewal rejected");
         return false;
     }
-    char token[sizeof(s_http_account.token)];
-    if (s_http_account.token[0] && session_cookie_copy("wr_skey", token, sizeof(token)) &&
-        strcmp(s_http_account.token, token)) {
-        memcpy(s_http_account.token, token, sizeof(s_http_account.token));
-        (void)save_account(&s_http_account);
+    /* Report-worker renewals run outside run_work(), where s_http_account is
+     * intentionally cleared. Reload the account snapshot so a rotated skey is
+     * persisted there too, not only in the cookie blob. */
+    wr_account_t updated = s_http_account;
+    if (!updated.owner[0]) (void)read_account(&updated);
+    char token[sizeof(updated.token)];
+    if (updated.owner[0] && session_cookie_copy("wr_skey", token, sizeof(token))) {
+        wr_account_t current;
+        bool same_account = read_account(&current) &&
+            !strcmp(current.owner, updated.owner) && current.library == updated.library;
+        if (!same_account) {
+            ESP_LOGW("WEREAD", "skip refreshed token save because account changed");
+        } else if (strcmp(current.token, token)) {
+            snprintf(current.token, sizeof(current.token), "%s", token);
+            if (save_account(&current)) s_http_account = current;
+        }
     }
     s_expired = false;
+    s_error_message = "操作失败，请检查网络后重试";
     ESP_LOGI("WEREAD", "session renewal confirmed refresh_cookie=%d", session_cookie_has("wr_rt"));
     return true;
 }
 
 static cJSON *wr_json_limit(const char *url, const char *body, size_t limit) {
-    for (unsigned attempt = 0; attempt < 2 && !wr_cancelled(); ++attempt) {
-        char *data = wr_http(url, body, NULL, limit, NULL);
-        if (!data) {
-            if (attempt == 0 && s_expired && renew_session()) continue;
-            return NULL;
-        }
-        // cJSON hooks are global; the other firmware clients can parse concurrently.
-        cJSON *json = cJSON_ParseWithOpts(data, NULL, true);
-        free(data);
-        if (!json) { s_error_message = "书架数据解析失败"; return NULL; }
-        const cJSON *error = cJSON_GetObjectItemCaseSensitive(json, "errcode");
-        if (!error) error = cJSON_GetObjectItemCaseSensitive(json, "errCode");
-        if ((cJSON_IsNumber(error) && error->valueint == -2012) ||
-            (cJSON_IsString(error) && !strcmp(error->valuestring, "-2012"))) s_expired = true;
-        if (attempt == 0 && s_expired && renew_session()) { cJSON_Delete(json); continue; }
-        return json;
-    }
-    return NULL;
+    char *data = wr_http(url, body, NULL, limit, NULL);
+    if (!data) return NULL;
+    // cJSON hooks are global; the other firmware clients can parse concurrently.
+    cJSON *json = cJSON_ParseWithOpts(data, NULL, true);
+    free(data);
+    if (!json) { s_error_message = "书架数据解析失败"; return NULL; }
+    const cJSON *error = cJSON_GetObjectItemCaseSensitive(json, "errcode");
+    if (!error) error = cJSON_GetObjectItemCaseSensitive(json, "errCode");
+    if (http_url_requires_session(url) &&
+        ((cJSON_IsNumber(error) && error->valueint == -2012) ||
+         (cJSON_IsString(error) && !strcmp(error->valuestring, "-2012")))) s_expired = true;
+    return json;
 }
 
 cJSON *wr_json(const char *url, const char *body) {
@@ -1204,7 +1424,11 @@ static void sync_covers(unsigned first, unsigned count) {
                  book.id, (long long)local_ms, (long long)net_ms, (unsigned)length,
                  (long long)decode_ms, (long long)write_ms,
                  (long long)((esp_timer_get_time()-cover_start)/1000), ok);
-        if (!ok) ESP_LOGW("WEREAD","cover unavailable book=%s url=%s error=%s",book.id,book.cover,wr_error_message());
+        if (!ok) {
+            char log_cover[256];
+            wr_http_log_target(book.cover, log_cover, sizeof(log_cover));
+            ESP_LOGW("WEREAD","cover unavailable book=%s url=%s error=%s",book.id,log_cover,wr_error_message());
+        }
         else ++downloaded;
         free(image);
         wr_work_progress(downloaded, count);
@@ -1398,7 +1622,14 @@ static bool login(void) {
                 // 换账号：旧会话立即失效，避免把旧账号的时长记到新账号。
                 // Account switched: retire the old session so its time can never bill the new one.
                 radio_hold(false);
-                memset(&s_reading, 0, sizeof(s_reading));
+                if (s_reading.ms >= 1000) {
+                    /* Retain the old-account timer until it is durably queued;
+                     * the report worker will then discard it as account-changed. */
+                    s_reading.attached = false;
+                    s_reading.last = 0;
+                } else {
+                    memset(&s_reading, 0, sizeof(s_reading));
+                }
             }
             s_http_account = account;
             return true;
@@ -1410,6 +1641,9 @@ static bool login(void) {
 
 bool wr_logout(bool remove_books) {
     if (wr_status(NULL, 0, NULL, NULL) == WR_BUSY) return false;
+    /* Close the current reading session against its original account before
+     * clearing credentials; any queued time is never reassigned to a new user. */
+    wr_reading_stop(true);
     wr_account_t account;
     if (!read_account(&account)) return true;
     if (remove_books) {
@@ -1588,7 +1822,12 @@ static bool same_report_book(const wr_report_t *a, const wr_report_t *b) {
 
 static report_result_t run_report(const wr_report_t *job, const char **stage) {
     *stage = "account";
-    if (!account_is(job->owner, job->library)) return REPORT_ACCOUNT_CHANGED;
+    memset(&s_http_account, 0, sizeof(s_http_account));
+    if (!account_is(job->owner, job->library) ||
+        !read_account(&s_http_account) ||
+        strcmp(s_http_account.owner, job->owner) ||
+        s_http_account.library != job->library) return REPORT_ACCOUNT_CHANGED;
+    s_expired = false;
     *stage = "wifi";
     if (!wr_online()) return REPORT_RETRY;
     wr_chapter_t chapter;
@@ -1635,6 +1874,12 @@ static void process_report(unsigned slot, const wr_report_t *job) {
     report_result_t result = run_report(job, &stage);
     s_processing_report = false;
     memset(s_cookies, 0, sizeof(s_cookies));
+    memset(&s_http_account, 0, sizeof(s_http_account));
+    if (!s_report_store_mutex ||
+        xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE("WEREAD", "report store mutex unavailable after result=%d", result);
+        return;
+    }
     int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     wr_report_t *pending = &s_reports[slot];
@@ -1649,6 +1894,11 @@ static void process_report(unsigned slot, const wr_report_t *job) {
     }
     unsigned remaining = pending->seconds;
     portEXIT_CRITICAL(&s_lock);
+    bool persisted = persist_report_queue_locked();
+    report_store_set_dirty(!persisted);
+    if (!persisted)
+        ESP_LOGW("WEREAD", "persist report queue failed after result=%d; worker will retry", result);
+    (void)xSemaphoreGive(s_report_store_mutex);
     const char *outcome = result == REPORT_CONFIRMED ? "confirmed" :
         result == REPORT_RETRY ? "retry" : result == REPORT_UNKNOWN ? "unknown" : "account_changed";
     ESP_LOGI("WEREAD", "report result=%s stage=%s seconds=%u pending=%u",
@@ -1663,9 +1913,10 @@ static void worker_task(void *arg) {
         bool pending = false;
         wr_report_t report;
         portENTER_CRITICAL(&s_lock);
-        bool work = s_work_pending;
+        bool store_dirty = s_report_store_dirty;
+        bool work = !store_dirty && s_work_pending;
         if (work) s_work_pending = false;
-        if (!work) {
+        if (!store_dirty && !work) {
             bool reader_idle = !s_reader_scanning && (!s_reader_scan_end || now - s_reader_scan_end >= 1200000);
             for (unsigned i = 0; i < sizeof(s_reports)/sizeof(s_reports[0]); ++i) {
                 if (!s_reports[i].seconds) continue;
@@ -1679,7 +1930,15 @@ static void worker_task(void *arg) {
         }
         portEXIT_CRITICAL(&s_lock);
 
-        if (work) {
+        if (store_dirty) {
+            bool saved = false;
+            if (s_report_store_mutex &&
+                xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) == pdTRUE) {
+                saved = report_store_flush_locked();
+                (void)xSemaphoreGive(s_report_store_mutex);
+            }
+            if (!saved) vTaskDelay(pdMS_TO_TICKS(500));
+        } else if (work) {
             // 发布完成前，WR_BUSY 保证任务参数不能被覆盖。/ WR_BUSY protects the job until its result is published.
             run_work(&s_work);
             http_keepalive_drop();
@@ -1699,6 +1958,10 @@ void wr_init(void) {
         ESP_LOGE("WEREAD", "cookie mutex initialization failed");
         return;
     }
+    if (!s_report_store_mutex)
+        s_report_store_mutex = xSemaphoreCreateMutexStatic(&s_report_store_mutex_storage);
+    if (s_report_store_mutex) load_report_queue();
+    else ESP_LOGE("WEREAD", "report queue persistence mutex initialization failed");
     s_worker = xTaskCreateStatic(worker_task, "weread", sizeof(s_worker_stack),
                                  NULL, 2, s_worker_stack, &s_worker_tcb);
     if (s_worker) ESP_LOGI("WEREAD", "worker ready stack=%u", (unsigned)sizeof(s_worker_stack));
@@ -1707,6 +1970,11 @@ void wr_init(void) {
 
 void wr_reading_start(const char *path, bool enabled, int64_t now_ms) {
     wr_reading_stop(true);
+    if (s_reading.ms >= 1000) {
+        ESP_LOGW("WEREAD", "new reading timer deferred; previous report is still pending seconds=%u",
+                 s_reading.ms / 1000);
+        return;
+    }
     if (!enabled || !wr_reporting_book(path, &s_reading.book)) return;
     wr_account_t account;
     if (!read_account(&account) || !account.token[0]) { memset(&s_reading, 0, sizeof(s_reading)); return; }
@@ -1718,15 +1986,24 @@ void wr_reading_start(const char *path, bool enabled, int64_t now_ms) {
     radio_hold(true);
 }
 
-static void report_reading(void) {
+static bool report_reading(void) {
     const unsigned seconds = s_reading.ms / 1000;
-    if (!seconds || !s_reading.owner[0] || !s_worker) return;
+    if (!seconds) return true;
+    if (!s_reading.owner[0] || !s_worker || !s_report_store_mutex) return false;
+    if (xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) != pdTRUE) return false;
+    if (!report_store_flush_locked()) {
+        (void)xSemaphoreGive(s_report_store_mutex);
+        ESP_LOGW("WEREAD", "cannot enqueue reading while report-store NVS retry is pending");
+        return false;
+    }
+
     wr_report_t job = { .library = s_reading.library, .seconds = seconds };
     memcpy(job.book_id, s_reading.book.id, sizeof(job.book_id));
     memcpy(job.owner, s_reading.owner, sizeof(job.owner));
+
     portENTER_CRITICAL(&s_lock);
     wr_report_t *empty = NULL, *entry = NULL;
-    for (unsigned i = 0; i < sizeof(s_reports)/sizeof(s_reports[0]); ++i) {
+    for (unsigned i = 0; i < WR_REPORT_COUNT; ++i) {
         if (!s_reports[i].seconds) {
             if (!empty) empty = &s_reports[i];
         } else if (same_report_book(&job, &s_reports[i])) {
@@ -1734,22 +2011,94 @@ static void report_reading(void) {
             break;
         }
     }
+
     bool accepted = false;
+    wr_report_t previous = {0};
+    wr_report_t *target = NULL;
     if (entry && seconds <= UINT32_MAX - entry->seconds) {
+        target = entry;
+        previous = *entry;
         entry->seconds += seconds;
         accepted = true;
-    } else if (!entry && empty) {
+    } else if (empty) {
+        target = empty;
+        previous = *empty;
         *empty = job;
         accepted = true;
     }
+
+    wr_reading_store_t previous_deferred = s_deferred_reading;
+    bool clear_deferred = !s_reading.attached &&
+        s_deferred_reading.milliseconds &&
+        s_deferred_reading.library == job.library &&
+        !strcmp(s_deferred_reading.owner, job.owner) &&
+        !strcmp(s_deferred_reading.book_id, job.book_id);
+    if (accepted && clear_deferred) memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
     portEXIT_CRITICAL(&s_lock);
-    if (!accepted) return;
+
+    if (!accepted) {
+        /* A closed reading can outlive a full queue. Keep one durable overflow
+         * record and leave the RAM timer untouched until a queue slot is free. */
+        bool deferred_saved = true;
+        if (!s_reading.attached) {
+            wr_reading_store_t deferred = {0};
+            memcpy(deferred.book_id, s_reading.book.id, sizeof(deferred.book_id));
+            memcpy(deferred.owner, s_reading.owner, sizeof(deferred.owner));
+            deferred.library = s_reading.library;
+            deferred.milliseconds = s_reading.ms;
+            portENTER_CRITICAL(&s_lock);
+            previous_deferred = s_deferred_reading;
+            bool already_persisted =
+                s_deferred_reading.milliseconds == deferred.milliseconds &&
+                s_deferred_reading.library == deferred.library &&
+                !strcmp(s_deferred_reading.owner, deferred.owner) &&
+                !strcmp(s_deferred_reading.book_id, deferred.book_id);
+            if (!already_persisted) s_deferred_reading = deferred;
+            portEXIT_CRITICAL(&s_lock);
+            /* Avoid committing the same overflow blob on every UI tick while
+             * the queue remains full; this record is already durable. */
+            if (!already_persisted) {
+                deferred_saved = persist_report_queue_locked();
+                if (!deferred_saved) {
+                    portENTER_CRITICAL(&s_lock);
+                    s_deferred_reading = previous_deferred;
+                    portEXIT_CRITICAL(&s_lock);
+                    report_store_set_dirty(false);
+                }
+            }
+        }
+        (void)xSemaphoreGive(s_report_store_mutex);
+        if (!deferred_saved)
+            ESP_LOGW("WEREAD", "persist deferred reading retry failed seconds=%u", seconds);
+        return false;
+    }
+
+    if (!persist_report_queue_locked()) {
+        /* Queue changes are transactional with NVS: do not consume the reading
+         * timer unless the new durable queue snapshot was committed. */
+        portENTER_CRITICAL(&s_lock);
+        *target = previous;
+        s_deferred_reading = previous_deferred;
+        portEXIT_CRITICAL(&s_lock);
+        report_store_set_dirty(false);
+        (void)xSemaphoreGive(s_report_store_mutex);
+        ESP_LOGW("WEREAD", "persist pending reading report failed seconds=%u", seconds);
+        return false;
+    }
+
     s_reading.ms %= 1000;
+    report_store_set_dirty(false);
+    (void)xSemaphoreGive(s_report_store_mutex);
     xTaskNotifyGive(s_worker);
+    return true;
 }
 
 void wr_reading_tick(bool active, int64_t now_ms) {
-    if (!s_reading.attached) return;
+    if (!s_reading.attached) {
+        if (s_reading.ms >= 1000 && report_reading() && s_reading.ms < 1000)
+            memset(&s_reading, 0, sizeof(s_reading));
+        return;
+    }
     if (!s_reading.last) { s_reading.last = now_ms; return; }
     int64_t elapsed = now_ms - s_reading.last;
     s_reading.last = now_ms;
@@ -1761,9 +2110,55 @@ void wr_reading_tick(bool active, int64_t now_ms) {
 }
 
 void wr_reading_stop(bool close) {
-    if (s_reading.attached) report_reading();
-    if (close && s_reading.ms >= 1000)
-        ESP_LOGW("WEREAD", "report queue unavailable at close seconds=%u", s_reading.ms / 1000);
+    bool queued = true;
+    if (s_reading.attached || s_reading.ms >= 1000) queued = report_reading();
+    if (close && s_reading.ms >= 1000 && !queued) {
+        bool persisted = false;
+        if (s_report_store_mutex &&
+            xSemaphoreTake(s_report_store_mutex, portMAX_DELAY) == pdTRUE) {
+            if (report_store_flush_locked()) {
+                wr_reading_store_t previous;
+                portENTER_CRITICAL(&s_lock);
+                previous = s_deferred_reading;
+                bool already_persisted =
+                    previous.milliseconds == s_reading.ms &&
+                    previous.library == s_reading.library &&
+                    !strcmp(previous.owner, s_reading.owner) &&
+                    !strcmp(previous.book_id, s_reading.book.id);
+                if (!already_persisted) {
+                    memset(&s_deferred_reading, 0, sizeof(s_deferred_reading));
+                    memcpy(s_deferred_reading.book_id, s_reading.book.id,
+                           sizeof(s_deferred_reading.book_id));
+                    memcpy(s_deferred_reading.owner, s_reading.owner,
+                           sizeof(s_deferred_reading.owner));
+                    s_deferred_reading.library = s_reading.library;
+                    s_deferred_reading.milliseconds = s_reading.ms;
+                }
+                portEXIT_CRITICAL(&s_lock);
+
+                persisted = already_persisted || persist_report_queue_locked();
+                if (!persisted) {
+                    portENTER_CRITICAL(&s_lock);
+                    s_deferred_reading = previous;
+                    portEXIT_CRITICAL(&s_lock);
+                }
+                /* On failure the rollback restores the snapshot just flushed. */
+                report_store_set_dirty(false);
+            } else {
+                ESP_LOGW("WEREAD", "deferred reading waits for report-store NVS retry");
+            }
+            (void)xSemaphoreGive(s_report_store_mutex);
+        }
+        if (!persisted)
+            ESP_LOGW("WEREAD", "persist deferred reading failed seconds=%u",
+                     s_reading.ms / 1000);
+        ESP_LOGW("WEREAD", "report queue full; retaining pending reading seconds=%u",
+                 s_reading.ms / 1000);
+        s_reading.attached = false;
+        s_reading.last = 0;
+        radio_hold(false);
+        return;
+    }
     radio_hold(false);
     s_reading.last = 0;
     if (close) memset(&s_reading, 0, sizeof(s_reading));
