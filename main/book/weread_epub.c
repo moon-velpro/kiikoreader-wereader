@@ -1,6 +1,7 @@
 #include "weread_internal.h"
 #include "weread_zip_stream.h"
 #include "weread_prefetch.h"
+#include "weread_tar.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -29,6 +30,11 @@ typedef struct { FILE *file, *directory; uint16_t count; } epub_writer_t;
 /* Observational counters only; no change to request order or buffer ownership. */
 static uint64_t s_cache_image_elapsed_us;
 #define WR_PREFETCH_CHAPTER 1
+#define WR_IMG_TAR_LIMIT (8u * 1024u * 1024u)
+
+static const void *s_active_tar;
+static size_t s_active_tar_bytes;
+static unsigned s_tar_image_hits;
 
 typedef struct {
     const wr_book_t *book;
@@ -206,8 +212,13 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
     url[used] = 0;
     if (image_reuse_find(url, name)) return !wr_cancelled();
     int64_t image_started = esp_timer_get_time();
-    size_t length;
-    char *data = NULL;
+    size_t length = 0;
+    const void *borrowed = NULL;
+    bool from_tar = s_active_tar &&
+                    wr_tar_find_image(s_active_tar, s_active_tar_bytes,
+                                      url, strlen(url), &borrowed, &length);
+    if (from_tar) ++s_tar_image_hits;
+    char *data = from_tar ? (char *)borrowed : NULL;
     for (unsigned attempt = 0; attempt < 3 && !data && !wr_cancelled(); ++attempt) {
         data = wr_http(url, NULL, NULL, 4*1024*1024, &length);
         if (!data && !strcmp(wr_error_message(), "微信读书图片地址不受支持")) break;
@@ -232,7 +243,7 @@ static bool image_entry(epub_writer_t *zip, FILE *opf, const char *src, size_t s
              (unsigned)length, (long long)((esp_timer_get_time() - image_started) / 1000), ok);
     if (ok && ext) image_reuse_add(url, name);
     if (!ext) name[0] = 0;
-    free(data);
+    if (!from_tar) free(data);
     if (!ok) wr_error_set("缓存失败：图片写入 EPUB 失败");
     return ok;
 }
@@ -473,6 +484,9 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         fputs("<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><body><nav epub:type=\"toc\"><ol>", nav) != EOF;
     image_reuse_reset();
     s_cache_image_elapsed_us = 0;
+    s_active_tar = NULL;
+    s_active_tar_bytes = 0;
+    s_tar_image_hits = 0;
     if (ok && book->cover[0]) {
         char name[40];
         ok = image_entry(&zip, opf, book->cover, strlen(book->cover), 0, name);
@@ -528,6 +542,33 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
         if (prefetch_enabled && i + 1 < count && !wr_cancelled()) {
             (void)wr_prefetch_arm(&prefetch, i + 1);
         }
+
+        /* The TOC's chapter tar bundles its images. Read it once; the rewrite
+         * path resolves each <img> by basename and falls back to individual
+         * HTTPS images only when a bundle member cannot be identified. */
+        char *tar_data = NULL;
+        size_t tar_bytes = 0;
+        if (chapters[i].tar[0] && !plain && !wr_cancelled()) {
+            char tar_url[384], reader_referer[384];
+            const char *src = chapters[i].tar;
+            int n = !strncmp(src, "//", 2)
+                  ? snprintf(tar_url, sizeof(tar_url), "https:%s", src)
+                  : *src == '/'
+                  ? snprintf(tar_url, sizeof(tar_url), "https://res.weread.qq.com%s", src)
+                  : snprintf(tar_url, sizeof(tar_url), "%s", src);
+            if (n > 0 && n < (int)sizeof(tar_url) &&
+                wr_reader_referer(book->id, chapters[i].id, reader_referer)) {
+                int64_t tar_started = esp_timer_get_time();
+                tar_data = wr_http(tar_url, NULL, reader_referer,
+                                   WR_IMG_TAR_LIMIT, &tar_bytes);
+                ESP_LOGI("WEREAD", "cache chapter tar index=%u bytes=%u elapsed_ms=%lld ok=%d",
+                         i + 1, (unsigned)tar_bytes,
+                         (long long)((esp_timer_get_time() - tar_started) / 1000),
+                         (int)(tar_data != NULL));
+            }
+        }
+        s_active_tar = tar_data;
+        s_active_tar_bytes = tar_bytes;
         int64_t transform_started = esp_timer_get_time();
         char name[40];
         snprintf(name, sizeof(name), "c%u.xhtml", i);
@@ -539,6 +580,9 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
             fprintf(nav,"<li><a href=\"%s\">",name) >= 0 && write_xml(nav,chapters[i].title,strlen(chapters[i].title)) &&
             fputs("</a></li>",nav) != EOF;
         if (chapter) fclose(chapter);
+        s_active_tar = NULL;
+        s_active_tar_bytes = 0;
+        free(tar_data);
         uint64_t transform_us = (uint64_t)(esp_timer_get_time() - transform_started);
         transform_elapsed_us += transform_us;
         chapter_elapsed_us += (uint64_t)(esp_timer_get_time() - chapter_started);
@@ -573,8 +617,8 @@ static bool package_book(const wr_book_t *book, FILE *target, const wr_chapter_t
              prefetch_hits, (long long)(prefetch_wait_us / 1000), (int)prefetch_enabled);
 cleanup:
     if (prefetch_enabled) wr_prefetch_end(&prefetch);
-    ESP_LOGI("WEREAD", "cache image reuse hits=%u stored=%u",
-             s_image_reuse_hits, s_image_reuse_count);
+    ESP_LOGI("WEREAD", "cache image reuse hits=%u stored=%u tar_images=%u",
+             s_image_reuse_hits, s_image_reuse_count, s_tar_image_hits);
     image_reuse_reset();
     if (nav) fclose(nav);
     if (opf) fclose(opf);
